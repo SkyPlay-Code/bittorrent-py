@@ -6,7 +6,6 @@ import message
 class PeerConnection:
     """
     A worker that continuously pulls peers from the queue and attempts to exchange data.
-    Reference: PDF Page 4 & 6.
     """
     def __init__(self, queue, piece_manager, info_hash, peer_id):
         self.queue = queue 
@@ -27,77 +26,61 @@ class PeerConnection:
         self.am_interested = False
 
     async def run(self):
-        """
-        Main worker loop.
-        """
         while True:
-            # 1. Get a peer from the queue
             try:
                 self.ip, self.port = await self.queue.get()
             except asyncio.CancelledError:
-                # Cancelled while waiting for item -> Stop worker, no task_done needed
                 self.stop()
                 break
 
-            # 2. Process the peer
-            # We have an item, so we MUST ensure task_done is called exactly once
             try:
-                logging.info(f"Worker grabbed peer {self.ip}:{self.port}")
+                logging.info(f"Worker attempting to connect to {self.ip}:{self.port}")
                 await self._connect_and_loop()
             except asyncio.CancelledError:
                 self.stop()
                 self.queue.task_done()
-                break # Exit loop
+                break 
             except Exception as e:
                 logging.error(f"Worker error with {self.ip}: {e}")
                 self.stop()
                 self.queue.task_done()
             else:
-                # Normal disconnect
                 self.stop()
                 self.queue.task_done()
 
     async def _connect_and_loop(self):
         try:
+            # 1. Open TCP Connection (10s timeout)
             self.reader, self.writer = await asyncio.wait_for(
                 asyncio.open_connection(self.ip, self.port), timeout=10
             )
+            logging.info(f"TCP Established with {self.ip}. Handshaking...")
             
-            # Handshake
-            await self._send_handshake()
-            await self._receive_handshake()
+            # 2. Perform Handshake (10s timeout)
+            # We wrap sending and receiving in a timeout block
+            await asyncio.wait_for(self._perform_handshake(), timeout=10)
+            logging.info(f"Handshake OK with {self.ip}. Starting Loop...")
             
-            # Register with PieceManager (assuming we handle bitfield message separately or here)
-            # In Phase 6 logic, we wait for bitfield in message loop.
-            
-            # Send Interested
+            # 3. Send Interested
             await self._send_interested()
             
-            # Message Loop
+            # 4. Message Loop (With inactivity timeout)
             async for msg in self._message_iterator():
                 await self._handle_message(msg)
                 
-        except (ConnectionError, asyncio.TimeoutError, OSError):
-            pass
+        except asyncio.TimeoutError:
+            logging.warning(f"Timeout connecting/handshaking with {self.ip}")
+        except (ConnectionError, OSError) as e:
+            logging.warning(f"Connection error with {self.ip}: {e}")
         except Exception as e:
-            logging.debug(f"Connection lost {self.ip}: {e}")
+            logging.error(f"Unexpected error with {self.ip}: {e}")
 
-    def stop(self):
-        if self.writer:
-            try:
-                self.writer.close()
-            except Exception:
-                pass
-        self.writer = None
-        self.reader = None
-        self.peer_choking = True
-
-    async def _send_handshake(self):
+    async def _perform_handshake(self):
+        """Helper to group handshake ops for timeout wrapping"""
         hs = message.Handshake(self.info_hash, self.my_peer_id)
         self.writer.write(hs.encode())
         await self.writer.drain()
-
-    async def _receive_handshake(self):
+        
         data = await self.reader.readexactly(68)
         pstrlen = data[0]
         if data[1:1+pstrlen] != b'BitTorrent protocol':
@@ -118,23 +101,26 @@ class PeerConnection:
     async def _message_iterator(self):
         while True:
             try:
-                length_data = await self.reader.readexactly(4)
+                # Wait up to 120 seconds for a message (Keep-Alive logic)
+                # If peer is silent for 2 mins, drop them.
+                length_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=120)
                 length = struct.unpack(">I", length_data)[0]
                 
                 if length == 0:
-                    yield message.PeerMessage(message.KEEP_ALIVE)
+                    # Keep Alive
                     continue
                 
-                id_data = await self.reader.readexactly(1)
+                id_data = await asyncio.wait_for(self.reader.readexactly(1), timeout=120)
                 msg_id = id_data[0]
                 
                 payload_length = length - 1
                 payload = b''
                 if payload_length > 0:
-                    payload = await self.reader.readexactly(payload_length)
+                    payload = await asyncio.wait_for(self.reader.readexactly(payload_length), timeout=120)
                 
                 yield message.PeerMessage(msg_id, payload)
-            except Exception:
+                
+            except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError):
                 break
 
     async def _handle_message(self, msg):
@@ -152,7 +138,6 @@ class PeerConnection:
             
         elif msg.msg_id == message.BITFIELD:
             self.piece_manager.add_peer(self.remote_peer_id, msg.payload)
-            # Re-check if we can request something now that we know what they have
             await self._request_piece()
             
         elif msg.msg_id == message.PIECE:
@@ -167,9 +152,18 @@ class PeerConnection:
         if self.peer_choking:
             return
         
-        # Ask manager what's next
         block = self.piece_manager.next_request(self.remote_peer_id)
         if block:
             req = message.Request(block.piece_index, block.offset, block.length)
             self.writer.write(req.encode())
             await self.writer.drain()
+
+    def stop(self):
+        if self.writer:
+            try:
+                self.writer.close()
+            except Exception:
+                pass
+        self.writer = None
+        self.reader = None
+        self.peer_choking = True

@@ -3,52 +3,79 @@ import struct
 import logging
 import message
 
-# Configure logging to show us what's happening
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 class PeerConnection:
     """
-    Manages the TCP connection to a single peer.
+    A worker that continuously pulls peers from the queue and attempts to exchange data.
+    Reference: PDF Page 4 & 6.
     """
-    def __init__(self, queue, info_hash, peer_id, ip, port):
+    def __init__(self, queue, piece_manager, info_hash, peer_id):
         self.queue = queue 
+        self.piece_manager = piece_manager
         self.info_hash = info_hash
         self.my_peer_id = peer_id
-        self.ip = ip
-        self.port = port
         self.remote_peer_id = None
         
         self.reader = None
         self.writer = None
+        self.ip = None
+        self.port = None
         
         # State
         self.peer_choking = True 
         self.peer_interested = False
         self.am_choking = True
         self.am_interested = False
-        
-        self.bitfield = None
 
-    async def start(self):
-        logging.info(f"Connecting to peer {self.ip}:{self.port}")
+    async def run(self):
+        """
+        Main worker loop.
+        """
+        while True:
+            # 1. Get a peer from the queue
+            try:
+                # wait for a peer
+                self.ip, self.port = await self.queue.get()
+                logging.info(f"Worker grabbed peer {self.ip}:{self.port}")
+                
+                # 2. Connect
+                await self._connect_and_loop()
+                
+            except asyncio.CancelledError:
+                # Graceful shutdown
+                self.stop()
+                break
+            except Exception as e:
+                logging.error(f"Worker error with {self.ip}: {e}")
+            finally:
+                self.stop()
+                self.queue.task_done()
+
+    async def _connect_and_loop(self):
         try:
-            self.reader, self.writer = await asyncio.open_connection(self.ip, self.port)
+            self.reader, self.writer = await asyncio.wait_for(
+                asyncio.open_connection(self.ip, self.port), timeout=10
+            )
             
-            # 1. Handshake
+            # Handshake
             await self._send_handshake()
             await self._receive_handshake()
             
-            # 2. Start Message Loop
+            # Register with PieceManager
+            # (In a real implementation we would wait for Bitfield first, 
+            # but we'll register presence now)
+            
+            # Send Interested
+            await self._send_interested()
+            
+            # Message Loop
             async for msg in self._message_iterator():
                 await self._handle_message(msg)
                 
-        except asyncio.CancelledError:
-            logging.info("Connection cancelled.")
-            raise
+        except (ConnectionError, asyncio.TimeoutError, OSError):
+            # Normal connection failures
+            pass
         except Exception as e:
-            logging.error(f"Error with peer {self.ip}: {e}")
-        finally:
-            self.stop()
+            logging.debug(f"Connection lost {self.ip}: {e}")
 
     def stop(self):
         if self.writer:
@@ -56,7 +83,9 @@ class PeerConnection:
                 self.writer.close()
             except Exception:
                 pass
-        logging.info("Peer connection closed")
+        self.writer = None
+        self.reader = None
+        self.peer_choking = True
 
     async def _send_handshake(self):
         hs = message.Handshake(self.info_hash, self.my_peer_id)
@@ -64,30 +93,26 @@ class PeerConnection:
         await self.writer.drain()
 
     async def _receive_handshake(self):
-        # Read exactly 68 bytes
         data = await self.reader.readexactly(68)
-        
-        # Validate protocol string
         pstrlen = data[0]
-        pstr = data[1:1+pstrlen]
-        if pstr != b'BitTorrent protocol':
+        if data[1:1+pstrlen] != b'BitTorrent protocol':
              raise ValueError("Unknown protocol")
-             
-        # Validate info_hash
-        received_info_hash = data[28:48]
-        if received_info_hash != self.info_hash:
-            raise ValueError("Info hash mismatch. Dropping connection.")
+        
+        received_hash = data[28:48]
+        if received_hash != self.info_hash:
+            raise ValueError("Info hash mismatch")
             
         self.remote_peer_id = data[48:]
-        logging.info(f"Handshake successful with {self.ip}")
+
+    async def _send_interested(self):
+        msg = message.PeerMessage(message.INTERESTED)
+        self.writer.write(msg.encode())
+        await self.writer.drain()
+        self.am_interested = True
 
     async def _message_iterator(self):
-        """
-        Async iterator that yields PeerMessages.
-        """
         while True:
             try:
-                # Read 4 bytes length
                 length_data = await self.reader.readexactly(4)
                 length = struct.unpack(">I", length_data)[0]
                 
@@ -95,20 +120,16 @@ class PeerConnection:
                     yield message.PeerMessage(message.KEEP_ALIVE)
                     continue
                 
-                # Read ID (1 byte)
                 id_data = await self.reader.readexactly(1)
                 msg_id = id_data[0]
                 
-                # Read Payload
                 payload_length = length - 1
                 payload = b''
                 if payload_length > 0:
                     payload = await self.reader.readexactly(payload_length)
                 
                 yield message.PeerMessage(msg_id, payload)
-                
-            except (asyncio.IncompleteReadError, ConnectionError):
-                logging.info("Peer disconnected (EOF)")
+            except Exception:
                 break
 
     async def _handle_message(self, msg):
@@ -118,19 +139,30 @@ class PeerConnection:
         elif msg.msg_id == message.UNCHOKE:
             logging.info(f"{self.ip} Unchoked us")
             self.peer_choking = False
-        elif msg.msg_id == message.INTERESTED:
-            self.peer_interested = True
-        elif msg.msg_id == message.NOT_INTERESTED:
-            self.peer_interested = False
+            await self._request_piece()
+            
         elif msg.msg_id == message.HAVE:
             index = struct.unpack(">I", msg.payload)[0]
-            logging.info(f"{self.ip} Has piece {index}")
+            self.piece_manager.update_peer(self.remote_peer_id, index)
+            
         elif msg.msg_id == message.BITFIELD:
-            self.bitfield = msg.payload
-            logging.info(f"{self.ip} sent BitField")
-        elif msg.msg_id == message.REQUEST:
-            pass 
+            self.piece_manager.add_peer(self.remote_peer_id, msg.payload)
+            
         elif msg.msg_id == message.PIECE:
-            pass 
-        elif msg.msg_id == message.CANCEL:
-            pass
+            index = struct.unpack(">I", msg.payload[0:4])[0]
+            begin = struct.unpack(">I", msg.payload[4:8])[0]
+            block_data = msg.payload[8:]
+            
+            self.piece_manager.block_received(self.remote_peer_id, index, begin, block_data)
+            await self._request_piece()
+
+    async def _request_piece(self):
+        if self.peer_choking:
+            return
+        
+        # Ask manager what's next
+        block = self.piece_manager.next_request(self.remote_peer_id)
+        if block:
+            req = message.Request(block.piece_index, block.offset, block.length)
+            self.writer.write(req.encode())
+            await self.writer.drain()

@@ -1,3 +1,59 @@
-2026-01-14 12:16:46,473 - INFO - Starting download: Sintel
-2026-01-14 12:16:46,474 - INFO - Announcing to tracker...
-2026-01-14 12:16:46,475 - ERROR - No working HTTP trackers found.
+2026-01-14 12:20:29,342 - INFO - Starting download: Cosmos Laundromat
+2026-01-14 12:20:29,345 - INFO - Announcing to tracker...
+2026-01-14 12:20:29,345 - INFO - Connecting to UDP tracker: udp://tracker.leechers-paradise.org:6969
+2026-01-14 12:20:33,557 - INFO - Connecting to UDP tracker: udp://tracker.coppersurfer.tk:6969
+2026-01-14 12:20:37,650 - INFO - Connecting to UDP tracker: udp://tracker.opentrackr.org:1337
+2026-01-14 12:20:38,190 - INFO - Tracker returned 41 peers
+2026-01-14 12:20:38,191 - INFO - Worker attempting to connect to 81.182.246.24:42069
+2026-01-14 12:20:38,193 - INFO - Worker attempting to connect to 82.67.127.150:16881
+2026-01-14 12:20:38,195 - INFO - Worker attempting to connect to 157.41.225.135:6881
+2026-01-14 12:20:38,197 - INFO - Worker attempting to connect to 213.152.161.153:40646
+2026-01-14 12:20:38,199 - INFO - Worker attempting to connect to 212.104.214.44:45940
+2026-01-14 12:20:38,433 - INFO - TCP Established with 212.104.214.44. Handshaking...
+2026-01-14 12:20:38,478 - INFO - TCP Established with 82.67.127.150. Handshaking...
+2026-01-14 12:20:38,666 - INFO - Handshake OK with 212.104.214.44. Starting Loop...
+2026-01-14 12:20:38,669 - INFO - 212.104.214.44 Unchoked us
+2026-01-14 12:20:38,804 - INFO - Handshake OK with 82.67.127.150. Starting Loop...
+2026-01-14 12:20:38,897 - INFO - 212.104.214.44 Unchoked us
+2026-01-14 12:20:43,308 - INFO - 82.67.127.150 Unchoked us
+2026-01-14 12:20:48,014 - INFO - Piece 0 verified.
+2026-01-14 12:20:48,198 - WARNING - Timeout connecting/handshaking with 81.182.246.24
+2026-01-14 12:20:48,199 - INFO - Worker attempting to connect to 212.15.82.135:30763
+2026-01-14 12:20:48,202 - WARNING - Timeout connecting/handshaking with 213.152.161.153
+2026-01-14 12:20:48,202 - INFO - Worker attempting to connect to 194.195.93.70:6881
+2026-01-14 12:20:48,205 - WARNING - Timeout connecting/handshaking with 157.41.225.135
+2026-01-14 12:20:48,205 - INFO - Worker attempting to connect to 193.138.7.225:55313
+2026-01-14 12:20:58,156 - INFO - Piece 1 verified.
+2026-01-14 12:20:58,208 - WARNING - Timeout connecting/handshaking with 212.15.82.135
+2026-01-14 12:20:58,208 - INFO - Worker attempting to connect to 193.77.101.7:35833
+2026-01-14 12:20:58,211 - WARNING - Timeout connecting/handshaking with 193.138.7.225
+2026-01-14 12:20:58,211 - INFO - Worker attempting to connect to 190.2.131.158:36215
+2026-01-14 12:20:58,214 - WARNING - Timeout connecting/handshaking with 194.195.93.70
+2026-01-14 12:20:58,215 - INFO - Worker attempting to connect to 185.246.211.202:37868
+2026-01-14 12:20:58,433 - INFO - TCP Established with 185.246.211.202. Handshaking...
+2026-01-14 12:20:58,663 - INFO - Handshake OK with 185.246.211.202. Starting Loop...
+2026-01-14 12:20:58,666 - INFO - 185.246.211.202 Unchoked us
+2026-01-14 12:20:58,864 - INFO - 185.246.211.202 Unchoked us
+2026-01-14 12:21:05,842 - INFO - Piece 2 verified.
+2026-01-14 12:21:08,212 - WARNING - Timeout connecting/handshaking with 193.77.101.7
+2026-01-14 12:21:08,213 - INFO - Worker attempting to connect to 185.149.91.77:51548
+2026-01-14 12:21:08,215 - WARNING - Timeout connecting/handshaking with 190.2.131.158
+2026-01-14 12:21:08,215 - INFO - Worker attempting to connect to 178.249.214.103:32243
+2026-01-14 12:21:08,416 - INFO - TCP Established with 185.149.91.77. Handshaking...
+2026-01-14 12:21:08,623 - INFO - Handshake OK with 185.149.91.77. Starting Loop...
+2026-01-14 12:21:09,063 - INFO - 185.149.91.77 Unchoked us
+2026-01-14 12:21:10,408 - INFO - Piece 3 verified.
+2026-01-14 12:21:11,743 - WARNING - Connection error with 178.249.214.103: [WinError 1225] The remote computer refused the network connection
+2026-01-14 12:21:11,744 - INFO - Worker attempting to connect to 176.206.41.83:51413
+2026-01-14 12:21:14,336 - INFO - Piece 4 verified.
+2026-01-14 12:21:14,777 - INFO - Piece 5 verified.
+2026-01-14 12:21:18,208 - INFO - Piece 6 verified.
+2026-01-14 12:21:20,300 - INFO - Piece 7 verified.
+2026-01-14 12:21:21,757 - WARNING - Timeout connecting/handshaking with 176.206.41.83
+2026-01-14 12:21:21,757 - INFO - Worker attempting to connect to 174.45.15.29:6888
+2026-01-14 12:21:22,256 - INFO - Piece 8 verified.
+2026-01-14 12:21:24,242 - INFO - Piece 9 verified.
+2026-01-14 12:21:27,649 - INFO - Piece 10 verified.
+2026-01-14 12:21:29,479 - INFO - Piece 11 verified.
+2026-01-14 12:21:31,753 - WARNING - Timeout connecting/handshaking with 174.45.15.29
+2026-01-14 12:21:31,753 - INFO - Worker attempting to connect to 159.26.99.67:48946

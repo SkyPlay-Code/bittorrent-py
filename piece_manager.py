@@ -2,6 +2,7 @@ import math
 import time
 import hashlib
 import logging
+from file_manager import FileManager
 
 BLOCK_SIZE = 2 ** 14
 
@@ -40,7 +41,7 @@ class Piece:
 class PieceManager:
     def __init__(self, torrent):
         self.torrent = torrent
-        self.peers = {} # peer_id -> set(piece_indices)
+        self.peers = {} 
         self.pending_blocks = [] 
         self.missing_pieces = [] 
         self.ongoing_pieces = [] 
@@ -49,14 +50,11 @@ class PieceManager:
         self._initiate_pieces()
         self.total_pieces = len(self.missing_pieces)
         
-        self.fd = open(self.torrent.output_file, "wb")
-        self.fd.seek(self.torrent.total_size - 1)
-        self.fd.write(b'\0')
-        self.fd.flush()
+        # Replaced raw file handle with FileManager
+        self.file_manager = FileManager(self.torrent)
 
     def close(self):
-        if self.fd:
-            self.fd.close()
+        self.file_manager.close()
 
     def _initiate_pieces(self):
         total_length = self.torrent.total_size
@@ -80,9 +78,6 @@ class PieceManager:
             self.missing_pieces.append(Piece(index, blocks, self.torrent.pieces[index]))
 
     def add_peer(self, peer_id, bitfield):
-        """
-        Parses a binary bitfield and initializes the peer's available pieces set.
-        """
         self.peers[peer_id] = set()
         for i, byte in enumerate(bitfield):
             for bit in range(8):
@@ -92,26 +87,17 @@ class PieceManager:
                         self.peers[peer_id].add(index)
 
     def update_peer(self, peer_id, index):
-        """
-        Updates the peer's set when a HAVE message is received.
-        """
         if peer_id in self.peers:
             self.peers[peer_id].add(index)
         else:
-            # If peer not registered yet (rare race condition), init set
             self.peers[peer_id] = {index}
 
     def next_request(self, peer_id):
-        """
-        Get the next block for this peer, ensuring they actually have the piece.
-        """
         peer_pieces = self.peers.get(peer_id, set())
 
-        # 1. Retry timed-out blocks
         current_time = time.time()
         for i, (block, request_time) in enumerate(self.pending_blocks):
             if current_time - request_time > 5:
-                # Only retry if this specific peer has the piece
                 if block.piece_index in peer_pieces:
                     self.pending_blocks.pop(i)
                     logging.info(f"Block timeout: Piece {block.piece_index} Offset {block.offset}")
@@ -119,7 +105,6 @@ class PieceManager:
                     self.pending_blocks.append((block, current_time))
                     return block
 
-        # 2. Check ongoing pieces
         for piece in self.ongoing_pieces:
             if piece.index in peer_pieces:
                 for block in piece.blocks:
@@ -128,13 +113,10 @@ class PieceManager:
                         self.pending_blocks.append((block, current_time))
                         return block
 
-        # 3. Start a new piece (Rarest First could go here, for now strictly Ordered)
         for i, piece in enumerate(self.missing_pieces):
             if piece.index in peer_pieces:
-                # Move from missing to ongoing
                 self.missing_pieces.pop(i)
                 self.ongoing_pieces.append(piece)
-                
                 block = piece.blocks[0]
                 block.status = Block.Pending
                 self.pending_blocks.append((block, current_time))
@@ -183,10 +165,10 @@ class PieceManager:
             self.missing_pieces.insert(0, piece) 
 
     def _write(self, piece, data):
-        offset = piece.index * self.torrent.piece_length
-        self.fd.seek(offset)
-        self.fd.write(data)
-        self.fd.flush()
+        # Calculate global offset of this piece
+        global_offset = piece.index * self.torrent.piece_length
+        # Delegate actual writing to FileManager
+        self.file_manager.write(global_offset, data)
 
     @property
     def complete(self):

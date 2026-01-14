@@ -33,20 +33,27 @@ class PeerConnection:
         while True:
             # 1. Get a peer from the queue
             try:
-                # wait for a peer
                 self.ip, self.port = await self.queue.get()
-                logging.info(f"Worker grabbed peer {self.ip}:{self.port}")
-                
-                # 2. Connect
-                await self._connect_and_loop()
-                
             except asyncio.CancelledError:
-                # Graceful shutdown
+                # Cancelled while waiting for item -> Stop worker, no task_done needed
                 self.stop()
                 break
+
+            # 2. Process the peer
+            # We have an item, so we MUST ensure task_done is called exactly once
+            try:
+                logging.info(f"Worker grabbed peer {self.ip}:{self.port}")
+                await self._connect_and_loop()
+            except asyncio.CancelledError:
+                self.stop()
+                self.queue.task_done()
+                break # Exit loop
             except Exception as e:
                 logging.error(f"Worker error with {self.ip}: {e}")
-            finally:
+                self.stop()
+                self.queue.task_done()
+            else:
+                # Normal disconnect
                 self.stop()
                 self.queue.task_done()
 
@@ -60,9 +67,8 @@ class PeerConnection:
             await self._send_handshake()
             await self._receive_handshake()
             
-            # Register with PieceManager
-            # (In a real implementation we would wait for Bitfield first, 
-            # but we'll register presence now)
+            # Register with PieceManager (assuming we handle bitfield message separately or here)
+            # In Phase 6 logic, we wait for bitfield in message loop.
             
             # Send Interested
             await self._send_interested()
@@ -72,7 +78,6 @@ class PeerConnection:
                 await self._handle_message(msg)
                 
         except (ConnectionError, asyncio.TimeoutError, OSError):
-            # Normal connection failures
             pass
         except Exception as e:
             logging.debug(f"Connection lost {self.ip}: {e}")
@@ -147,6 +152,8 @@ class PeerConnection:
             
         elif msg.msg_id == message.BITFIELD:
             self.piece_manager.add_peer(self.remote_peer_id, msg.payload)
+            # Re-check if we can request something now that we know what they have
+            await self._request_piece()
             
         elif msg.msg_id == message.PIECE:
             index = struct.unpack(">I", msg.payload[0:4])[0]

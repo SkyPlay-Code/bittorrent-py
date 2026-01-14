@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 class TestClientIntegration(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        # 1. Start a Fake Peer Server
         self.server_received_handshake = False
         self.server_received_request = False
         
@@ -27,24 +26,31 @@ class TestClientIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def handle_fake_peer(self, reader, writer):
         try:
-            # Read handshake
             data = await reader.read(68)
             if len(data) == 68:
                 self.server_received_handshake = True
                 
-                # Send Handshake back
-                # Use arbitrary hash/id, client only checks hash match which we can mock or mirror
+                # 1. Send Handshake
                 info_hash = data[28:48]
                 hs = message.Handshake(info_hash, b'-PC0001-SERVER000000')
                 writer.write(hs.encode())
                 
-                # Send Unchoke
+                # 2. Send Bitfield (CRITICAL FIX)
+                # We claim to have piece 0 (0x80 = 10000000)
+                bitfield_msg = struct.pack(">IB", 2, message.BITFIELD) + b'\x80'
+                writer.write(bitfield_msg)
+
+                # 3. Send Unchoke
                 writer.write(message.PeerMessage(message.UNCHOKE).encode())
                 await writer.drain()
                 
-                # Wait for Request
+                # 4. Wait for Request
                 while True:
-                    msg_len_data = await reader.read(4)
+                    try:
+                        msg_len_data = await asyncio.wait_for(reader.read(4), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        break
+                        
                     if not msg_len_data: break
                     msg_len = struct.unpack(">I", msg_len_data)[0]
                     if msg_len == 0: continue
@@ -54,8 +60,6 @@ class TestClientIntegration(unittest.IsolatedAsyncioTestCase):
                     
                     if msg_id == message.REQUEST:
                         self.server_received_request = True
-                        # Don't need to actually send PIECE for this test to pass
-                        # We just want to prove the client connected and asked.
                         break
         except Exception:
             pass
@@ -70,31 +74,25 @@ class TestClientIntegration(unittest.IsolatedAsyncioTestCase):
         t_instance.output_file = "test_integration.bin"
         t_instance.total_size = 32768
         t_instance.piece_length = 32768
-        t_instance.pieces = [b'\x00'*20] # Dummy hash
+        t_instance.pieces = [b'\x00'*20]
         t_instance.info_hash = b'\x11'*20
         
-        # Mock Tracker to return our Fake Peer
+        # Mock Tracker
         tr_instance = MockTracker.return_value
         tr_instance.peer_id = b'-PC0001-CLIENT000000'
         tr_instance.connect = AsyncMock(return_value=[('127.0.0.1', 9999)])
         
-        # Instantiate Client
         client = TorrentClient("dummy.torrent")
-        
-        # We run the client for a brief moment
         task = asyncio.create_task(client.start())
         
-        # Wait for interaction
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.0) # Give enough time for handshake + bitfield + request
         
-        # Stop client
         client.stop()
         try:
             await task
         except asyncio.CancelledError:
             pass
             
-        # Verify
         self.assertTrue(self.server_received_handshake, "Client failed to handshake")
         self.assertTrue(self.server_received_request, "Client failed to request piece")
 

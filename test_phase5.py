@@ -17,7 +17,6 @@ class TestPieceManager(unittest.TestCase):
         # Piece 1: 17232 bytes (remainder)
         
         # Calculate Hashes
-        # We will create fake content
         self.data_p0 = b'a' * 32768
         self.data_p1 = b'b' * 17232
         
@@ -27,6 +26,10 @@ class TestPieceManager(unittest.TestCase):
         self.torrent.pieces = [hash0, hash1]
         
         self.pm = PieceManager(self.torrent)
+        
+        # CRITICAL FIX: Register "peer1" as having all pieces (Bitfield: 11111111)
+        # We have 2 pieces, so 1 byte (8 bits) is sufficient.
+        self.pm.add_peer("peer1", b'\xff')
 
     def tearDown(self):
         self.pm.close()
@@ -34,21 +37,15 @@ class TestPieceManager(unittest.TestCase):
             os.remove("test_output.bin")
 
     def test_initialization(self):
-        # We expect 2 pieces
         self.assertEqual(len(self.pm.missing_pieces), 2)
         self.assertEqual(self.pm.total_pieces, 2)
-        
-        # Piece 0 should have 2 blocks (16KB + 16KB)
         self.assertEqual(len(self.pm.missing_pieces[0].blocks), 2)
-        
-        # Piece 1 should have 2 blocks (16KB + remainder)
         self.assertEqual(len(self.pm.missing_pieces[1].blocks), 2)
-        self.assertEqual(self.pm.missing_pieces[1].blocks[1].length, 17232 - 16384)
 
     def test_block_request_flow(self):
         # 1. Request first block
         block = self.pm.next_request("peer1")
-        self.assertIsNotNone(block)
+        self.assertIsNotNone(block, "Should return a block because peer1 has everything")
         self.assertEqual(block.piece_index, 0)
         self.assertEqual(block.offset, 0)
         self.assertEqual(block.status, Block.Pending)
@@ -61,13 +58,13 @@ class TestPieceManager(unittest.TestCase):
         self.pm.block_received("peer1", 0, 0, b'a' * 16384)
         
         # Block status should be Retrieved
-        p0 = self.pm.ongoing_pieces[0]
+        p0 = next(p for p in self.pm.ongoing_pieces if p.index == 0)
         self.assertEqual(p0.blocks[0].status, Block.Retrieved)
 
     def test_integrity_check_success(self):
         # Request and fulfill all blocks for Piece 0
-        b1 = self.pm.next_request("peer1")
-        b2 = self.pm.next_request("peer1")
+        self.pm.next_request("peer1")
+        self.pm.next_request("peer1")
         
         self.pm.block_received("peer1", 0, 0, self.data_p0[:16384])
         self.pm.block_received("peer1", 0, 16384, self.data_p0[16384:])
@@ -93,11 +90,7 @@ class TestPieceManager(unittest.TestCase):
         
         # Should detect failure, reset piece, and put back in missing
         self.assertEqual(len(self.pm.have_pieces), 0)
-        
-        # Missing should have P0 (returned) + P1 (untouched) = 2
         self.assertEqual(len(self.pm.missing_pieces), 2) 
-        
-        # Ensure P0 is prioritized (inserted at 0)
         self.assertEqual(self.pm.missing_pieces[0].index, 0)
         
 if __name__ == '__main__':

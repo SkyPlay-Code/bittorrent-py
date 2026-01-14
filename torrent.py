@@ -3,26 +3,20 @@ import os
 from bencoding import Decoder, Encoder
 
 class TorrentFile:
-    """
-    Data class representing a specific file within the torrent.
-    """
     def __init__(self, path: str, length: int):
         self.path = path
         self.length = length
-        self.start_offset = 0 # Global offset where this file begins
-        self.end_offset = 0   # Global offset where this file ends
+        self.start_offset = 0 
+        self.end_offset = 0   
 
 class Torrent:
-    """
-    Wrapper around the bencoded meta-info files.
-    """
     def __init__(self, filename):
         self.filename = filename
         self._meta_info = {}
         self._info_hash = None
-        self.files = [] # List of TorrentFile objects
+        self.files = [] 
         self.total_size = 0
-        self.root_name = "" # Root filename or directory name
+        self.root_name = "" 
         self._parse()
 
     def _parse(self):
@@ -37,21 +31,15 @@ class Torrent:
         if not info:
             raise ValueError("Invalid torrent file: missing 'info' dictionary")
             
-        # Calculate SHA1 hash of the bencoded 'info' dict
         encoded_info = Encoder(info).encode()
         self._info_hash = hashlib.sha1(encoded_info).digest()
         
-        # Parse Files
         self._parse_files(info)
 
     def _parse_files(self, info):
-        """
-        Normalizes single-file and multi-file torrents into a standard list.
-        """
         self.root_name = info[b'name'].decode('utf-8')
         
         if b'files' in info:
-            # Multi-file mode
             offset = 0
             for file_data in info[b'files']:
                 length = file_data[b'length']
@@ -66,7 +54,6 @@ class Torrent:
                 offset += length
             self.total_size = offset
         else:
-            # Single-file mode
             length = info[b'length']
             tf = TorrentFile(self.root_name, length)
             tf.start_offset = 0
@@ -76,11 +63,35 @@ class Torrent:
             self.total_size = length
 
     @property
+    def trackers(self) -> list:
+        """
+        Returns a list of all tracker URLs (strings).
+        Checks 'announce-list' first, falls back to 'announce'.
+        """
+        urls = []
+        
+        # Check announce-list (list of lists of bytes)
+        if b'announce-list' in self._meta_info:
+            for tier in self._meta_info[b'announce-list']:
+                for url_bytes in tier:
+                    urls.append(url_bytes.decode('utf-8'))
+        
+        # Check announce (single bytes)
+        if b'announce' in self._meta_info:
+            urls.append(self._meta_info[b'announce'].decode('utf-8'))
+            
+        # Deduplicate while preserving order
+        seen = set()
+        unique_urls = []
+        for u in urls:
+            if u not in seen:
+                unique_urls.append(u)
+                seen.add(u)
+                
+        return unique_urls
+
+    @property
     def output_file(self) -> str:
-        """
-        Returns the name of the main file or directory.
-        Used for logging in the Client.
-        """
         return self.root_name
 
     @property
@@ -99,11 +110,3 @@ class Torrent:
     @property
     def info_hash(self) -> bytes:
         return self._info_hash
-    
-    def __str__(self):
-        return (f"Name: {self.root_name}\n"
-                f"Total Size: {self.total_size} bytes\n"
-                f"Piece Length: {self.piece_length}\n"
-                f"Pieces: {len(self.pieces)}\n"
-                f"Info Hash: {self.info_hash.hex()}\n"
-                f"Files: {len(self.files)}")

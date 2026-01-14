@@ -46,11 +46,11 @@ class PieceManager:
         self.missing_pieces = [] 
         self.ongoing_pieces = [] 
         self.have_pieces = []    
+        self.downloaded_bytes = 0 # New: Track total verified bytes
         
         self._initiate_pieces()
         self.total_pieces = len(self.missing_pieces)
         
-        # Replaced raw file handle with FileManager
         self.file_manager = FileManager(self.torrent)
 
     def close(self):
@@ -94,17 +94,18 @@ class PieceManager:
 
     def next_request(self, peer_id):
         peer_pieces = self.peers.get(peer_id, set())
-
         current_time = time.time()
+        
+        # 1. Retry timed-out
         for i, (block, request_time) in enumerate(self.pending_blocks):
             if current_time - request_time > 5:
                 if block.piece_index in peer_pieces:
                     self.pending_blocks.pop(i)
-                    logging.info(f"Block timeout: Piece {block.piece_index} Offset {block.offset}")
                     block.status = Block.Pending
                     self.pending_blocks.append((block, current_time))
                     return block
 
+        # 2. Ongoing
         for piece in self.ongoing_pieces:
             if piece.index in peer_pieces:
                 for block in piece.blocks:
@@ -113,6 +114,7 @@ class PieceManager:
                         self.pending_blocks.append((block, current_time))
                         return block
 
+        # 3. New
         for i, piece in enumerate(self.missing_pieces):
             if piece.index in peer_pieces:
                 self.missing_pieces.pop(i)
@@ -121,7 +123,6 @@ class PieceManager:
                 block.status = Block.Pending
                 self.pending_blocks.append((block, current_time))
                 return block
-            
         return None
 
     def block_received(self, peer_id, piece_index, block_offset, data):
@@ -145,8 +146,7 @@ class PieceManager:
 
     def _validate_piece(self, piece):
         raw_data = piece.data
-        if not raw_data: 
-            return
+        if not raw_data: return
 
         hashed = hashlib.sha1(raw_data).digest()
         
@@ -155,19 +155,16 @@ class PieceManager:
             self.ongoing_pieces.remove(piece)
             self.have_pieces.append(piece)
             piece.is_complete = True
-            
-            percent = (len(self.have_pieces) / self.total_pieces) * 100
-            logging.info(f"Piece {piece.index} verified. Progress: {percent:.2f}%")
+            self.downloaded_bytes += len(raw_data) # New: Update counter
+            logging.info(f"Piece {piece.index} verified.")
         else:
-            logging.error(f"Piece {piece.index} hash mismatch! Re-queueing.")
+            logging.warning(f"Piece {piece.index} hash mismatch. Retrying.")
             piece.reset()
             self.ongoing_pieces.remove(piece)
             self.missing_pieces.insert(0, piece) 
 
     def _write(self, piece, data):
-        # Calculate global offset of this piece
         global_offset = piece.index * self.torrent.piece_length
-        # Delegate actual writing to FileManager
         self.file_manager.write(global_offset, data)
 
     @property

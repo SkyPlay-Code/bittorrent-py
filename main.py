@@ -8,9 +8,15 @@ def main():
         print("Usage: python main.py <torrent_file>")
         sys.exit(1)
 
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    # CRITICAL CHANGE: Log to file, not console
+    logging.basicConfig(
+        filename='bittorrent.log',
+        filemode='w',
+        level=logging.INFO, 
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
     
-    # Suppress noisy logs
+    # Suppress noisy logs from libraries
     logging.getLogger('asyncio').setLevel(logging.WARNING)
     
     client = TorrentClient(sys.argv[1])

@@ -5,7 +5,9 @@ import message
 
 class PeerConnection:
     """
-    A worker that continuously pulls peers from the queue and attempts to exchange data.
+    A persistent worker that continuously pulls peers from the queue.
+    If a connection fails, it resets and grabs the next peer.
+    It only stops if the Client explicitly cancels the task.
     """
     def __init__(self, queue, piece_manager, info_hash, peer_id):
         self.queue = queue 
@@ -27,24 +29,29 @@ class PeerConnection:
 
     async def run(self):
         while True:
+            # 1. Get a peer from the queue
             try:
                 self.ip, self.port = await self.queue.get()
             except asyncio.CancelledError:
-                self.stop()
+                # Main client is shutting down
                 break
 
+            # 2. Attempt Connection
             try:
                 logging.info(f"Worker attempting to connect to {self.ip}:{self.port}")
                 await self._connect_and_loop()
             except asyncio.CancelledError:
+                # We were cancelled while connected/connecting
                 self.stop()
                 self.queue.task_done()
                 break 
             except Exception as e:
+                # Any other error (timeout, connection refused, etc.)
+                # We Log it, but we DO NOT BREAK the loop.
                 logging.error(f"Worker error with {self.ip}: {e}")
-                self.stop()
-                self.queue.task_done()
-            else:
+            finally:
+                # Cleanup state for this peer, mark queue item done, 
+                # and IMMEDIATELY loop back to get the next peer.
                 self.stop()
                 self.queue.task_done()
 
@@ -57,7 +64,6 @@ class PeerConnection:
             logging.info(f"TCP Established with {self.ip}. Handshaking...")
             
             # 2. Perform Handshake (10s timeout)
-            # We wrap sending and receiving in a timeout block
             await asyncio.wait_for(self._perform_handshake(), timeout=10)
             logging.info(f"Handshake OK with {self.ip}. Starting Loop...")
             
@@ -72,11 +78,12 @@ class PeerConnection:
             logging.warning(f"Timeout connecting/handshaking with {self.ip}")
         except (ConnectionError, OSError) as e:
             logging.warning(f"Connection error with {self.ip}: {e}")
+        except asyncio.CancelledError:
+            raise # Re-raise to be caught by the run loop
         except Exception as e:
             logging.error(f"Unexpected error with {self.ip}: {e}")
 
     async def _perform_handshake(self):
-        """Helper to group handshake ops for timeout wrapping"""
         hs = message.Handshake(self.info_hash, self.my_peer_id)
         self.writer.write(hs.encode())
         await self.writer.drain()
@@ -102,12 +109,10 @@ class PeerConnection:
         while True:
             try:
                 # Wait up to 120 seconds for a message (Keep-Alive logic)
-                # If peer is silent for 2 mins, drop them.
                 length_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=120)
                 length = struct.unpack(">I", length_data)[0]
                 
                 if length == 0:
-                    # Keep Alive
                     continue
                 
                 id_data = await asyncio.wait_for(self.reader.readexactly(1), timeout=120)

@@ -2,7 +2,7 @@ import unittest
 import os
 import hashlib
 from piece_manager import PieceManager, Block
-from torrent import Torrent
+from torrent import Torrent, TorrentFile
 from unittest.mock import MagicMock
 
 class TestPieceManager(unittest.TestCase):
@@ -12,6 +12,13 @@ class TestPieceManager(unittest.TestCase):
         self.torrent.output_file = "test_output.bin"
         self.torrent.total_size = 50000 # ~50KB
         self.torrent.piece_length = 32768 # 32KB pieces
+        
+        # Mock the 'files' attribute for FileManager
+        # We simulate a single file torrent for simplicity in this test
+        tf = TorrentFile("test_output.bin", 50000)
+        tf.start_offset = 0
+        tf.end_offset = 50000
+        self.torrent.files = [tf]
         
         # Piece 0: 32KB
         # Piece 1: 17232 bytes (remainder)
@@ -27,8 +34,7 @@ class TestPieceManager(unittest.TestCase):
         
         self.pm = PieceManager(self.torrent)
         
-        # CRITICAL FIX: Register "peer1" as having all pieces (Bitfield: 11111111)
-        # We have 2 pieces, so 1 byte (8 bits) is sufficient.
+        # Register "peer1" as having all pieces
         self.pm.add_peer("peer1", b'\xff')
 
     def tearDown(self):
@@ -45,7 +51,7 @@ class TestPieceManager(unittest.TestCase):
     def test_block_request_flow(self):
         # 1. Request first block
         block = self.pm.next_request("peer1")
-        self.assertIsNotNone(block, "Should return a block because peer1 has everything")
+        self.assertIsNotNone(block)
         self.assertEqual(block.piece_index, 0)
         self.assertEqual(block.offset, 0)
         self.assertEqual(block.status, Block.Pending)

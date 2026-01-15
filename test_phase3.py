@@ -12,7 +12,8 @@ class TestTracker(unittest.TestCase):
     def setUp(self):
         # Mock the Torrent object
         self.torrent = MagicMock(spec=Torrent)
-        self.torrent.announce = "http://tracker.example.com/announce"
+        # NEW: Tracker now iterates over a list of trackers
+        self.torrent.trackers = ["http://tracker.example.com/announce"]
         self.torrent.info_hash = b'\x12' * 20
         self.torrent.total_size = 1000
 
@@ -37,14 +38,11 @@ class TestTracker(unittest.TestCase):
         port_bytes2 = struct.pack(">H", 8080)
         peers_binary += ip_bytes2 + port_bytes2
         
-        # Create bencoded response
-        response_dict = OrderedDict()
-        response_dict[b'interval'] = 1800
-        response_dict[b'peers'] = peers_binary
-        encoded_response = Encoder(response_dict).encode()
+        # Create bencoded response (Standard HTTP Tracker Response)
+        # Note: Tracker._decode_peers expects just the binary string now, 
+        # extracted from the dict in _connect_http
         
-        # Test the private decoding method directly to verify logic
-        peers = t._decode_tracker_response(encoded_response)
+        peers = t._decode_peers(peers_binary)
         
         self.assertEqual(len(peers), 2)
         self.assertEqual(peers[0], ("192.168.0.1", 6881))

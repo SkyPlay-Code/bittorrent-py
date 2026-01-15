@@ -41,12 +41,12 @@ class Piece:
 class PieceManager:
     def __init__(self, torrent):
         self.torrent = torrent
-        self.peers = {} 
+        self.peers = {} # peer_id -> set(piece_indices)
         self.pending_blocks = [] 
         self.missing_pieces = [] 
         self.ongoing_pieces = [] 
         self.have_pieces = []    
-        self.downloaded_bytes = 0 # New: Track total verified bytes
+        self.downloaded_bytes = 0 
         
         self._initiate_pieces()
         self.total_pieces = len(self.missing_pieces)
@@ -93,10 +93,16 @@ class PieceManager:
             self.peers[peer_id] = {index}
 
     def next_request(self, peer_id):
+        """
+        Determines the next block to request.
+        Priority 1: Timed-out blocks (Recover lost requests)
+        Priority 2: Ongoing pieces (Finish what we started)
+        Priority 3: Rarest First (Start new pieces that are scarce)
+        """
         peer_pieces = self.peers.get(peer_id, set())
         current_time = time.time()
         
-        # 1. Retry timed-out
+        # 1. Retry timed-out blocks
         for i, (block, request_time) in enumerate(self.pending_blocks):
             if current_time - request_time > 5:
                 if block.piece_index in peer_pieces:
@@ -105,7 +111,8 @@ class PieceManager:
                     self.pending_blocks.append((block, current_time))
                     return block
 
-        # 2. Ongoing
+        # 2. Continue ongoing pieces
+        # We prioritize finishing pieces to flush them to disk and validate checksums early.
         for piece in self.ongoing_pieces:
             if piece.index in peer_pieces:
                 for block in piece.blocks:
@@ -114,16 +121,37 @@ class PieceManager:
                         self.pending_blocks.append((block, current_time))
                         return block
 
-        # 3. New
-        for i, piece in enumerate(self.missing_pieces):
-            if piece.index in peer_pieces:
-                self.missing_pieces.pop(i)
-                self.ongoing_pieces.append(piece)
-                block = piece.blocks[0]
-                block.status = Block.Pending
-                self.pending_blocks.append((block, current_time))
-                return block
-        return None
+        # 3. Start a new piece using "Rarest First" strategy
+        # Filter: only consider missing pieces that THIS peer has
+        candidates = [p for p in self.missing_pieces if p.index in peer_pieces]
+        
+        if not candidates:
+            return None
+            
+        # Helper to count frequency of a piece across ALL peers
+        def get_rarity(piece):
+            count = 0
+            for peer_set in self.peers.values():
+                if piece.index in peer_set:
+                    count += 1
+            return count
+        
+        # Sort by rarity (ascending count)
+        # This puts pieces held by fewer peers at the start of the list
+        candidates.sort(key=get_rarity)
+        
+        # Pick the rarest one
+        piece = candidates[0]
+        
+        # Move state
+        self.missing_pieces.remove(piece)
+        self.ongoing_pieces.append(piece)
+        
+        # Request first block
+        block = piece.blocks[0]
+        block.status = Block.Pending
+        self.pending_blocks.append((block, current_time))
+        return block
 
     def block_received(self, peer_id, piece_index, block_offset, data):
         matches = [x for x in self.pending_blocks 
@@ -155,13 +183,14 @@ class PieceManager:
             self.ongoing_pieces.remove(piece)
             self.have_pieces.append(piece)
             piece.is_complete = True
-            self.downloaded_bytes += len(raw_data) # New: Update counter
+            self.downloaded_bytes += len(raw_data)
             logging.info(f"Piece {piece.index} verified.")
         else:
             logging.warning(f"Piece {piece.index} hash mismatch. Retrying.")
             piece.reset()
             self.ongoing_pieces.remove(piece)
-            self.missing_pieces.insert(0, piece) 
+            # Re-insert at front? Rarest first calculation will handle priority next time naturally.
+            self.missing_pieces.append(piece) 
 
     def _write(self, piece, data):
         global_offset = piece.index * self.torrent.piece_length

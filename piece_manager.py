@@ -2,6 +2,8 @@ import math
 import time
 import hashlib
 import logging
+import os
+import struct
 from file_manager import FileManager
 
 BLOCK_SIZE = 2 ** 14
@@ -47,16 +49,25 @@ class PieceManager:
         self.ongoing_pieces = [] 
         self.have_pieces = []    
         self.downloaded_bytes = 0 
+        self.resume_file = f"{self.torrent.info_hash.hex()}.resume"
         
-        self._initiate_pieces()
+        # Initialize pieces structures first
+        self._initiate_pieces_structure()
         self.total_pieces = len(self.missing_pieces)
         
         self.file_manager = FileManager(self.torrent)
+        
+        # Attempt Resume
+        self._restore_state()
 
     def close(self):
+        self.save_resume_data()
         self.file_manager.close()
 
-    def _initiate_pieces(self):
+    def _initiate_pieces_structure(self):
+        """
+        Creates the Piece and Block objects but doesn't assign state yet.
+        """
         total_length = self.torrent.total_size
         piece_length = self.torrent.piece_length
         num_pieces = math.ceil(total_length / piece_length)
@@ -75,8 +86,134 @@ class PieceManager:
                 b_length = b_end - b_start
                 blocks.append(Block(index, b_start, b_length))
             
+            # Initially all are missing
             self.missing_pieces.append(Piece(index, blocks, self.torrent.pieces[index]))
 
+    def _restore_state(self):
+        """
+        Tries to load fast-resume data. If unavailable, performs a full disk hash check.
+        """
+        if os.path.exists(self.resume_file):
+            try:
+                logging.info("Found resume file. Loading state...")
+                self._load_fast_resume()
+                return
+            except Exception as e:
+                logging.warning(f"Failed to load resume file: {e}. Falling back to full check.")
+        
+        # Fallback: Check existing data on disk
+        logging.info("Checking existing data on disk (this may take a while)...")
+        self._hash_check()
+
+    def _load_fast_resume(self):
+        with open(self.resume_file, 'rb') as f:
+            bitfield = f.read()
+            
+        if len(bitfield) * 8 < self.total_pieces:
+            raise ValueError("Resume file too short")
+
+        # Iterate and update state
+        # We need to move pieces from missing to have
+        pieces_to_move = []
+        
+        for i, piece in enumerate(self.missing_pieces):
+            byte_index = i // 8
+            bit_index = 7 - (i % 8)
+            if (bitfield[byte_index] >> bit_index) & 1:
+                pieces_to_move.append(piece)
+
+        for piece in pieces_to_move:
+            piece.is_complete = True
+            for block in piece.blocks:
+                block.status = Block.Retrieved # Logically retrieved
+            self.have_pieces.append(piece)
+            self.downloaded_bytes += self._get_piece_length(piece.index)
+        
+        # Remove from missing
+        for piece in pieces_to_move:
+            self.missing_pieces.remove(piece)
+
+        logging.info(f"Fast Resume: {len(self.have_pieces)} pieces loaded.")
+
+    def _hash_check(self):
+        """
+        Reads every piece from disk and verifies the hash.
+        """
+        pieces_found = 0
+        
+        # We iterate a copy because we might modify the list structure
+        # actually we just iterate indices or the initial list
+        # missing_pieces currently contains ALL pieces.
+        
+        # List to hold confirmed pieces to move later
+        confirmed_pieces = []
+
+        for piece in list(self.missing_pieces):
+            # Read data
+            offset = piece.index * self.torrent.piece_length
+            length = self._get_piece_length(piece.index)
+            
+            data = self.file_manager.read(offset, length)
+            
+            if not data or len(data) != length:
+                continue # Incomplete or missing
+                
+            # Hash check
+            if hashlib.sha1(data).digest() == piece.hash:
+                piece.is_complete = True
+                for block in piece.blocks:
+                    block.status = Block.Retrieved
+                
+                confirmed_pieces.append(piece)
+                self.downloaded_bytes += length
+                pieces_found += 1
+                
+                # print progress occasionally
+                if pieces_found % 10 == 0:
+                    percent = (pieces_found / self.total_pieces) * 100
+                    print(f"Rechecking: {percent:.1f}%", end='\r')
+
+        # Update lists
+        for piece in confirmed_pieces:
+            self.missing_pieces.remove(piece)
+            self.have_pieces.append(piece)
+            
+        print(f"Recheck complete. Resuming {pieces_found}/{self.total_pieces} pieces.")
+
+    def save_resume_data(self):
+        """
+        Saves the current bitfield to disk.
+        """
+        if not self.have_pieces:
+            return
+
+        num_bytes = math.ceil(self.total_pieces / 8)
+        bitfield = bytearray(num_bytes)
+        
+        for piece in self.have_pieces:
+            byte_index = piece.index // 8
+            bit_index = 7 - (piece.index % 8)
+            bitfield[byte_index] |= (1 << bit_index)
+            
+        try:
+            with open(self.resume_file, 'wb') as f:
+                f.write(bitfield)
+            logging.info("Resume data saved.")
+        except Exception as e:
+            logging.error(f"Failed to save resume data: {e}")
+
+    def _get_piece_length(self, index):
+        # Last piece might be shorter
+        if index == self.total_pieces - 1:
+            remainder = self.torrent.total_size % self.torrent.piece_length
+            return remainder if remainder > 0 else self.torrent.piece_length
+        return self.torrent.piece_length
+
+    # --- Standard Methods (add_peer, next_request, etc.) remain the same ---
+    # To save space in this response, assume the logic from Phase 12 
+    # (Rarest First, Hash Validation, etc.) is preserved here.
+    # Only the constructor and close methods changed significantly.
+    
     def add_peer(self, peer_id, bitfield):
         self.peers[peer_id] = set()
         for i, byte in enumerate(bitfield):
@@ -166,6 +303,9 @@ class PieceManager:
             piece.is_complete = True
             self.downloaded_bytes += len(raw_data)
             logging.info(f"Piece {piece.index} verified.")
+            # Trigger immediate save for crash resilience? 
+            # Optional: self.save_resume_data() 
+            # Doing it every piece might be IO heavy, but good for safety.
         else:
             logging.warning(f"Piece {piece.index} hash mismatch. Retrying.")
             piece.reset()
@@ -177,14 +317,7 @@ class PieceManager:
         self.file_manager.write(global_offset, data)
 
     def read_block(self, piece_index, block_offset, length):
-        """
-        Reads a block from the file system to serve a peer request.
-        Only returns data if we have verified the piece.
-        """
-        # Check if we have this piece in 'have_pieces'
-        # optimization: use a set for have_pieces indices for O(1) lookups
         has_piece = any(p.index == piece_index for p in self.have_pieces)
-        
         if has_piece:
             global_offset = (piece_index * self.torrent.piece_length) + block_offset
             return self.file_manager.read(global_offset, length)

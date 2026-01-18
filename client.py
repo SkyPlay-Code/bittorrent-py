@@ -9,8 +9,8 @@ from metadata import MetadataManager
 from peer import PeerConnection
 from nat import NatTraverser
 
-MAX_PEER_CONNECTIONS = 50  # Global Limit
-MAX_HALF_OPEN = 10         # Router Safety Limit
+MAX_PEER_CONNECTIONS = 50  
+MAX_HALF_OPEN = 10         
 
 class TorrentClient:
     def __init__(self, torrent_file):
@@ -21,17 +21,16 @@ class TorrentClient:
         self.workers = []
         self.abort = False
         self.nat = NatTraverser()
-        
-        # Router Protection: Semaphore to limit concurrent SYN packets
         self.dial_semaphore = asyncio.Semaphore(MAX_HALF_OPEN)
 
     async def start(self):
         logging.info(f"Starting client...")
         
+        # UPnP
         print("Attempting UPnP Port Mapping...")
         await self.nat.map_port(6881)
 
-        # --- Phase 1: Metadata Download ---
+        # Phase 1: Metadata
         if not self.torrent.loaded:
             print("Magnet Link detected. Fetching Metadata...")
             success = await self._fetch_metadata()
@@ -40,11 +39,19 @@ class TorrentClient:
                 return
             print("Metadata received and verified.")
 
-        # --- Phase 2: File Download ---
+        # Phase 2: File Download
         print(f"Initializing Download: {self.torrent.output_file}")
+        
+        # This will trigger the Resume Check / Recheck
         self.piece_manager = PieceManager(self.torrent)
         
-        # Start Normal Workers (Scaled up to MAX_PEER_CONNECTIONS)
+        # Calculate initial completion
+        if self.piece_manager.complete:
+            print("Download already complete! Seeding...")
+        elif self.piece_manager.downloaded_bytes > 0:
+            percent = (self.piece_manager.downloaded_bytes / self.torrent.total_size) * 100
+            print(f"Resuming from {percent:.2f}%")
+        
         self.workers = [] 
         for _ in range(MAX_PEER_CONNECTIONS): 
             worker = PeerConnection(self.peers_queue, self.piece_manager, 
@@ -58,7 +65,6 @@ class TorrentClient:
     async def _fetch_metadata(self):
         meta_manager = MetadataManager(self.torrent.info_hash)
         
-        # Metadata Phase also respects connection limits
         for _ in range(MAX_PEER_CONNECTIONS):
             worker = PeerConnection(self.peers_queue, meta_manager, 
                                     self.torrent.info_hash, self.tracker.peer_id,
@@ -99,13 +105,17 @@ class TorrentClient:
         previous_announce = 0
         interval = 30 * 60 
         last_time = time.time()
-        last_downloaded = 0
+        last_downloaded = self.piece_manager.downloaded_bytes # Init correctly
         
         print("Connecting to swarm for files...")
 
         try:
-            while not self.piece_manager.complete and not self.abort:
+            # Loop runs if incomplete OR if complete (seeding mode)
+            while not self.abort:
                 now = time.time()
+                
+                # Exit if complete and you want to stop? 
+                # Usually clients seed forever. Let's seed forever.
                 
                 if (now - previous_announce) >= interval:
                     logging.info("Announcing to tracker...")
@@ -128,9 +138,6 @@ class TorrentClient:
                     self._render_dashboard(current_downloaded, total_size, speed, eta_seconds, self.peers_queue.qsize())
 
                 await asyncio.sleep(0.5)
-            
-            self._render_dashboard(self.torrent.total_size, self.torrent.total_size, 0, 0, 0)
-            print("\n\nDownload Complete!")
             
         except asyncio.CancelledError:
             print("\nStopped.")
@@ -167,7 +174,9 @@ class TorrentClient:
         elif eta < 3600: eta_str = f"{int(eta//60)}m {int(eta%60)}s"
         else: eta_str = f"{int(eta//3600)}h {int((eta%3600)//60)}m"
 
-        sys.stdout.write(f"\r[{bar}] {percent:.2f}% | {speed_str} | ETA: {eta_str} | Peers: {peers}   ")
+        status = "Seeding" if downloaded == total else "Downloading"
+        
+        sys.stdout.write(f"\r[{bar}] {percent:.2f}% | {speed_str} | ETA: {eta_str} | Peers: {peers} | {status}   ")
         sys.stdout.flush()
 
     def stop(self):

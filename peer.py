@@ -10,10 +10,10 @@ from mse import perform_mse_handshake
 class PeerConnection:
     def __init__(self, queue, manager, info_hash, peer_id, 
                  dial_semaphore=None, is_metadata_mode=False, 
-                 utp_manager=None, enable_mse=True, conn_manager=None): # Added conn_manager
+                 utp_manager=None, enable_mse=True, conn_manager=None):
         self.queue = queue 
         self.manager = manager 
-        self.conn_manager = conn_manager # Reference to Choker
+        self.conn_manager = conn_manager 
         self.info_hash = info_hash
         self.my_peer_id = peer_id
         self.dial_semaphore = dial_semaphore
@@ -31,17 +31,14 @@ class PeerConnection:
         self.supports_extensions = False
         self.remote_metadata_size = 0
         
-        # PEX State
         self.sent_peers = set()
         self.pex_task = None
         
-        # Protocol State
         self.peer_choking = True      
         self.peer_interested = False  
         self.am_choking = True        
         self.am_interested = False    
 
-        # Choking / Stats State
         self.last_data_recv = time.time()
         self.is_snubbed = False
         self.download_window = 0
@@ -50,51 +47,39 @@ class PeerConnection:
         self.upload_rate = 0.0
 
     def tick_stats(self):
-        """Called by ConnectionManager every 10s"""
         self.download_rate = self.download_window / 10.0
         self.upload_rate = self.upload_window / 10.0
         self.download_window = 0
         self.upload_window = 0
-        
-        if time.time() - self.last_data_recv > 60:
-            self.is_snubbed = True
-        else:
-            self.is_snubbed = False
+        if time.time() - self.last_data_recv > 60: self.is_snubbed = True
+        else: self.is_snubbed = False
 
     def unchoke(self):
-        if self.am_choking:
-            asyncio.create_task(self._send_unchoke())
+        if self.am_choking: asyncio.create_task(self._send_unchoke())
 
     def choke(self):
-        if not self.am_choking:
-            asyncio.create_task(self._send_choke())
+        if not self.am_choking: asyncio.create_task(self._send_choke())
 
     async def run(self):
         while True:
             try:
                 self.ip, self.port = await self.queue.get()
-            except asyncio.CancelledError:
-                break
-
+            except asyncio.CancelledError: break
             try:
                 await self._connect_and_loop()
             except asyncio.CancelledError:
                 self.stop()
                 self.queue.task_done()
                 raise 
-            except Exception as e:
-                pass
-            
+            except Exception as e: pass
             self.stop()
             self.queue.task_done()
 
     async def _connect_and_loop(self):
         try:
             if self.dial_semaphore:
-                async with self.dial_semaphore:
-                    await self._establish_socket()
-            else:
-                await self._establish_socket()
+                async with self.dial_semaphore: await self._establish_socket()
+            else: await self._establish_socket()
 
             if self.enable_mse:
                 encrypted_conn = await perform_mse_handshake(self.reader, self.writer, self.info_hash)
@@ -104,26 +89,20 @@ class PeerConnection:
 
             await asyncio.wait_for(self._perform_handshake(), timeout=10)
             
-            # Register with Connection Manager
-            if self.conn_manager:
-                self.conn_manager.add_connection(self)
+            if self.conn_manager: self.conn_manager.add_connection(self)
 
             if self.supports_extensions:
                 await self._send_extended_handshake()
                 self.pex_task = asyncio.create_task(self._pex_heartbeat())
             
-            if not self.is_metadata_mode:
-                await self._send_interested()
+            if not self.is_metadata_mode: await self._send_interested()
             
             async for msg in self._message_iterator():
                 await self._handle_message(msg)
                 
-        except (asyncio.TimeoutError, ConnectionError, OSError):
-            pass
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logging.error(f"Error {self.ip}: {e}")
+        except (asyncio.TimeoutError, ConnectionError, OSError): pass
+        except asyncio.CancelledError: raise
+        except Exception as e: logging.error(f"Error {self.ip}: {e}")
 
     async def _establish_socket(self):
         self.reader, self.writer = await asyncio.wait_for(
@@ -134,15 +113,10 @@ class PeerConnection:
         hs = message.Handshake(self.info_hash, self.my_peer_id)
         self.writer.write(hs.encode())
         await self.writer.drain()
-        
         data = await self.reader.readexactly(68)
         if data[1:20] != b'BitTorrent protocol': raise ValueError("Unknown protocol")
-        
-        reserved_byte_5 = data[25]
-        if reserved_byte_5 & 0x10: self.supports_extensions = True
-        
+        if data[25] & 0x10: self.supports_extensions = True
         if data[28:48] != self.info_hash: raise ValueError("Info hash mismatch")
-        
         self.remote_peer_id = data[48:]
 
     async def _send_extended_handshake(self):
@@ -172,15 +146,8 @@ class PeerConnection:
         while True:
             await asyncio.sleep(60) 
             if not self.supports_extensions or b'ut_pex' not in self.remote_extensions: continue
-            
-            active_peers = self.manager.get_active_peers()
-            added = []
-            for ip, port in active_peers:
-                peer_tuple = (ip, port)
-                if peer_tuple == (self.ip, self.port): continue
-                if peer_tuple not in self.sent_peers:
-                    added.append(peer_tuple)
-            added = added[:50]
+            active = self.manager.get_active_peers()
+            added = [p for p in active if p != (self.ip, self.port) and p not in self.sent_peers][:50]
             if added:
                 self._send_pex_message(added)
                 for p in added: self.sent_peers.add(p)
@@ -222,13 +189,9 @@ class PeerConnection:
         elif msg.msg_id == message.UNCHOKE:
             self.peer_choking = False
             await self._request_piece()
-        
-        if msg.msg_id == message.INTERESTED:
+        elif msg.msg_id == message.INTERESTED:
             self.peer_interested = True
-            # Fallback for Unit Tests without Manager
-            if self.conn_manager is None:
-                await self._send_unchoke()
-            
+            if self.conn_manager is None: await self._send_unchoke()
         elif msg.msg_id == message.NOT_INTERESTED: self.peer_interested = False
         elif msg.msg_id == message.HAVE:
             index = struct.unpack(">I", msg.payload)[0]
@@ -243,11 +206,8 @@ class PeerConnection:
             index = struct.unpack(">I", msg.payload[0:4])[0]
             begin = struct.unpack(">I", msg.payload[4:8])[0]
             block_data = msg.payload[8:]
-            
-            # Update Stats
             self.download_window += len(block_data)
             self.last_data_recv = time.time()
-            
             self.manager.block_received(self.remote_peer_id, index, begin, block_data)
             await self._request_piece()
 
@@ -267,14 +227,12 @@ class PeerConnection:
     def _handle_ext_handshake(self, data):
         try:
             handshake_dict = Decoder(data).decode()
-            if b'm' in handshake_dict:
-                self.remote_extensions = handshake_dict[b'm']
+            if b'm' in handshake_dict: self.remote_extensions = handshake_dict[b'm']
             if b'metadata_size' in handshake_dict:
                 self.remote_metadata_size = handshake_dict[b'metadata_size']
                 if self.is_metadata_mode:
                     self.manager.set_size(self.remote_metadata_size)
                     asyncio.create_task(self._request_metadata_piece())
-            
             self.manager.add_peer(self.remote_peer_id, [], self.ip, self.port)
         except Exception: pass
 
@@ -320,14 +278,11 @@ class PeerConnection:
             except Exception: pass
 
     async def _handle_request(self, index, begin, length):
-        # Enforce Choking
-        if self.am_choking: return
-        if length > 32768: return
-        
-        block_data = self.manager.read_block(index, begin, length)
+        if self.am_choking or length > 32768: return
+        # NEW: Await the async read
+        block_data = await self.manager.read_block(index, begin, length)
         if block_data:
-            self.upload_window += len(block_data) # Update Stats
-            
+            self.upload_window += len(block_data)
             payload = struct.pack(">II", index, begin) + block_data
             msg = message.PeerMessage(message.PIECE, payload)
             self.writer.write(msg.encode())
@@ -342,8 +297,7 @@ class PeerConnection:
             await self.writer.drain()
 
     def stop(self):
-        if self.conn_manager:
-            self.conn_manager.remove_connection(self)
+        if self.conn_manager: self.conn_manager.remove_connection(self)
         if self.pex_task: self.pex_task.cancel()
         if self.remote_peer_id: self.manager.remove_peer(self.remote_peer_id)
         if self.writer:

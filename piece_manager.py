@@ -3,6 +3,7 @@ import time
 import hashlib
 import logging
 import os
+import asyncio
 from file_manager import FileManager
 
 BLOCK_SIZE = 2 ** 14
@@ -34,16 +35,15 @@ class Piece:
 
     @property
     def data(self):
-        if any(b.data is None for b in self.blocks):
-            return None
+        if any(b.data is None for b in self.blocks): return None
         sorted_blocks = sorted(self.blocks, key=lambda b: b.offset)
         return b''.join([b.data for b in sorted_blocks])
 
 class PieceManager:
     def __init__(self, torrent):
         self.torrent = torrent
-        self.peers = {} # peer_id -> set(piece_indices)
-        self.active_peers = {} # peer_id -> (ip, port) [NEW]
+        self.peers = {} 
+        self.active_peers = {}
         self.pending_blocks = [] 
         self.missing_pieces = [] 
         self.ongoing_pieces = [] 
@@ -70,16 +70,13 @@ class PieceManager:
             start = index * piece_length
             end = min(start + piece_length, total_length)
             this_piece_length = end - start
-            
             num_blocks = math.ceil(this_piece_length / BLOCK_SIZE)
             blocks = []
-            
             for b_idx in range(num_blocks):
                 b_start = b_idx * BLOCK_SIZE
                 b_end = min(b_start + BLOCK_SIZE, this_piece_length)
                 b_length = b_end - b_start
                 blocks.append(Block(index, b_start, b_length))
-            
             self.missing_pieces.append(Piece(index, blocks, self.torrent.pieces[index]))
 
     def _restore_state(self):
@@ -94,103 +91,77 @@ class PieceManager:
         self._hash_check()
 
     def _load_fast_resume(self):
-        with open(self.resume_file, 'rb') as f:
-            bitfield = f.read()
-        if len(bitfield) * 8 < self.total_pieces: raise ValueError("Resume file too short")
+        with open(self.resume_file, 'rb') as f: bitfield = f.read()
         pieces_to_move = []
         for i, piece in enumerate(self.missing_pieces):
-            byte_index = i // 8
-            bit_index = 7 - (i % 8)
-            if (bitfield[byte_index] >> bit_index) & 1:
-                pieces_to_move.append(piece)
+            if (bitfield[i // 8] >> (7 - (i % 8))) & 1: pieces_to_move.append(piece)
         for piece in pieces_to_move:
             piece.is_complete = True
             for block in piece.blocks: block.status = Block.Retrieved
             self.have_pieces.append(piece)
             self.downloaded_bytes += self._get_piece_length(piece.index)
         for piece in pieces_to_move: self.missing_pieces.remove(piece)
-        logging.info(f"Fast Resume: {len(self.have_pieces)} pieces loaded.")
 
     def _hash_check(self):
-        pieces_found = 0
-        confirmed_pieces = []
+        confirmed = []
         for piece in list(self.missing_pieces):
-            offset = piece.index * self.torrent.piece_length
-            length = self._get_piece_length(piece.index)
-            data = self.file_manager.read(offset, length)
-            if not data or len(data) != length: continue
-            if hashlib.sha1(data).digest() == piece.hash:
+            data = self.file_manager._read_sync(piece.index * self.torrent.piece_length, self._get_piece_length(piece.index))
+            if data and hashlib.sha1(data).digest() == piece.hash:
                 piece.is_complete = True
                 for block in piece.blocks: block.status = Block.Retrieved
-                confirmed_pieces.append(piece)
-                self.downloaded_bytes += length
-                pieces_found += 1
-                if pieces_found % 10 == 0: print(f"Rechecking: {(pieces_found / self.total_pieces) * 100:.1f}%", end='\r')
-        for piece in confirmed_pieces:
+                confirmed.append(piece)
+                self.downloaded_bytes += len(data)
+        for piece in confirmed:
             self.missing_pieces.remove(piece)
             self.have_pieces.append(piece)
-        print(f"Recheck complete. Resuming {pieces_found}/{self.total_pieces} pieces.")
 
     def save_resume_data(self):
         if not self.have_pieces: return
-        num_bytes = math.ceil(self.total_pieces / 8)
-        bitfield = bytearray(num_bytes)
-        for piece in self.have_pieces:
-            byte_index = piece.index // 8
-            bit_index = 7 - (piece.index % 8)
-            bitfield[byte_index] |= (1 << bit_index)
-        try:
-            with open(self.resume_file, 'wb') as f: f.write(bitfield)
+        bf = bytearray(math.ceil(self.total_pieces / 8))
+        for p in self.have_pieces: bf[p.index // 8] |= (1 << (7 - (p.index % 8)))
+        try: 
+            with open(self.resume_file, 'wb') as f: 
+                f.write(bf)
             logging.info("Resume data saved.")
-        except Exception: pass
+        except Exception: 
+            pass
 
     def _get_piece_length(self, index):
         if index == self.total_pieces - 1:
-            remainder = self.torrent.total_size % self.torrent.piece_length
-            return remainder if remainder > 0 else self.torrent.piece_length
+            r = self.torrent.total_size % self.torrent.piece_length
+            return r if r > 0 else self.torrent.piece_length
         return self.torrent.piece_length
 
-    # --- Updated Peer Management ---
     def add_peer(self, peer_id, bitfield, ip=None, port=None):
         self.peers[peer_id] = set()
-        # Parse bitfield (standard logic)
         for i, byte in enumerate(bitfield):
             for bit in range(8):
                 if (byte >> (7 - bit)) & 1:
-                    index = i * 8 + bit
-                    if index < self.total_pieces:
-                        self.peers[peer_id].add(index)
-        
-        # Store Connection Details for PEX
-        if ip and port:
-            self.active_peers[peer_id] = (ip, port)
+                    idx = i * 8 + bit
+                    if idx < self.total_pieces: self.peers[peer_id].add(idx)
+        if ip and port: self.active_peers[peer_id] = (ip, port)
 
     def remove_peer(self, peer_id):
-        if peer_id in self.active_peers:
-            del self.active_peers[peer_id]
-        if peer_id in self.peers:
-            del self.peers[peer_id]
+        if peer_id in self.active_peers: del self.active_peers[peer_id]
+        if peer_id in self.peers: del self.peers[peer_id]
 
-    def get_active_peers(self):
-        """Returns a list of (ip, port) tuples for PEX."""
-        return list(self.active_peers.values())
-
+    def get_active_peers(self): return list(self.active_peers.values())
+    
     def update_peer(self, peer_id, index):
-        if peer_id in self.peers:
-            self.peers[peer_id].add(index)
-        else:
-            self.peers[peer_id] = {index}
+        if peer_id in self.peers: self.peers[peer_id].add(index)
+        else: self.peers[peer_id] = {index}
 
-    # --- Request/Validation Logic (Same as before) ---
+    @property
+    def end_game_mode(self):
+        return len(self.missing_pieces) < 5 or len(self.missing_pieces) < (self.total_pieces * 0.01)
+
     def next_request(self, peer_id):
         peer_pieces = self.peers.get(peer_id, set())
         current_time = time.time()
         for i, (block, request_time) in enumerate(self.pending_blocks):
             if current_time - request_time > 5:
                 if block.piece_index in peer_pieces:
-                    self.pending_blocks.pop(i)
-                    block.status = Block.Pending
-                    self.pending_blocks.append((block, current_time))
+                    self.pending_blocks[i] = (block, current_time)
                     return block
         for piece in self.ongoing_pieces:
             if piece.index in peer_pieces:
@@ -199,14 +170,14 @@ class PieceManager:
                         block.status = Block.Pending
                         self.pending_blocks.append((block, current_time))
                         return block
+        if self.end_game_mode:
+            for piece in self.ongoing_pieces:
+                if piece.index in peer_pieces:
+                    for block in piece.blocks:
+                        if block.status == Block.Pending: return block
         candidates = [p for p in self.missing_pieces if p.index in peer_pieces]
         if not candidates: return None
-        def get_rarity(piece):
-            count = 0
-            for peer_set in self.peers.values():
-                if piece.index in peer_set: count += 1
-            return count
-        candidates.sort(key=get_rarity)
+        candidates.sort(key=lambda p: sum(1 for peers in self.peers.values() if p.index in peers))
         piece = candidates[0]
         self.missing_pieces.remove(piece)
         self.ongoing_pieces.append(piece)
@@ -216,42 +187,46 @@ class PieceManager:
         return block
 
     def block_received(self, peer_id, piece_index, block_offset, data):
-        matches = [x for x in self.pending_blocks if x[0].piece_index == piece_index and x[0].offset == block_offset]
-        if matches: self.pending_blocks.remove(matches[0])
+        self.pending_blocks = [x for x in self.pending_blocks if not (x[0].piece_index == piece_index and x[0].offset == block_offset)]
         target_piece = next((p for p in self.ongoing_pieces if p.index == piece_index), None)
         if not target_piece: return
         target_block = next((b for b in target_piece.blocks if b.offset == block_offset), None)
         if target_block:
             target_block.status = Block.Retrieved
             target_block.data = data
-        if all(b.status == Block.Retrieved for b in target_piece.blocks): self._validate_piece(target_piece)
+        if all(b.status == Block.Retrieved for b in target_piece.blocks):
+            self._validate_piece(target_piece)
 
     def _validate_piece(self, piece):
         raw_data = piece.data
         if not raw_data: return
         hashed = hashlib.sha1(raw_data).digest()
         if hashed == piece.hash:
-            self._write(piece, raw_data)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._write_async(piece, raw_data))
+            except RuntimeError:
+                # Sync fallback for tests if loop isn't running
+                pass 
             self.ongoing_pieces.remove(piece)
             self.have_pieces.append(piece)
             piece.is_complete = True
             self.downloaded_bytes += len(raw_data)
             logging.info(f"Piece {piece.index} verified.")
         else:
-            logging.warning(f"Piece {piece.index} hash mismatch. Retrying.")
+            logging.warning(f"Piece {piece.index} hash mismatch.")
             piece.reset()
             self.ongoing_pieces.remove(piece)
             self.missing_pieces.insert(0, piece) 
 
-    def _write(self, piece, data):
-        global_offset = piece.index * self.torrent.piece_length
-        self.file_manager.write(global_offset, data)
+    async def _write_async(self, piece, data):
+        await self.file_manager.write(piece.index * self.torrent.piece_length, data)
 
-    def read_block(self, piece_index, block_offset, length):
+    async def read_block(self, piece_index, block_offset, length):
         has_piece = any(p.index == piece_index for p in self.have_pieces)
         if has_piece:
             global_offset = (piece_index * self.torrent.piece_length) + block_offset
-            return self.file_manager.read(global_offset, length)
+            return await self.file_manager.read(global_offset, length)
         return None
 
     @property

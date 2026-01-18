@@ -71,7 +71,10 @@ class TestUploading(unittest.IsolatedAsyncioTestCase):
         queue.put_nowait(('127.0.0.1', 8888))
         
         pm = MagicMock()
-        pm.read_block.return_value = b'A' * 16384
+        # Make read_block return an awaitable
+        future = asyncio.Future()
+        future.set_result(b'A' * 16384)
+        pm.read_block.return_value = future
         
         # DISABLE MSE
         pc = PeerConnection(queue, pm, self.server_info_hash, b'-PC0001-TEST00000000', enable_mse=False)

@@ -1,19 +1,27 @@
 import os
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 class FileManager:
     """
     Manages reading and writing data across multiple files.
-    Implements a Write-Back Cache to optimize Disk I/O.
+    Features:
+    - ThreadPool execution for Non-Blocking I/O
+    - Sparse File creation (instant allocation)
+    - Write-Back Caching
     """
     def __init__(self, torrent):
         self.torrent = torrent
-        self._open_files()
-        
-        # Caching
-        self.write_cache = {} # Map: global_offset -> bytes
+        # Create a pool for Disk I/O
+        self.io_executor = ThreadPoolExecutor(max_workers=1) 
+        self.write_cache = {} 
         self.cache_size = 0
-        self.CACHE_THRESHOLD = 64 * 1024 * 1024 # 64MB Cache
+        self.CACHE_THRESHOLD = 64 * 1024 * 1024 
+        
+        # We perform file opening synchronously on init to fail fast, 
+        # but file creation is now sparse (fast).
+        self._open_files()
 
     def _open_files(self):
         self.file_handles = []
@@ -22,56 +30,57 @@ class FileManager:
             if directory and not os.path.exists(directory):
                 os.makedirs(directory)
             
+            # Sparse File Creation
             if not os.path.exists(tf.path):
-                open(tf.path, 'wb').close() 
-                
+                with open(tf.path, 'wb') as f:
+                    # Resize without writing bytes (Sparse)
+                    f.truncate(tf.length)
+            
+            # Open for Read/Write
             f = open(tf.path, 'rb+')
-            f.seek(0, os.SEEK_END)
-            if f.tell() != tf.length:
-                f.truncate(tf.length)
-                
             self.file_handles.append({
                 'obj': f,
                 'info': tf
             })
 
     def close(self):
-        self.flush() # CRITICAL: Write remaining data to disk
+        # Flush is async, but close is usually called at shutdown.
+        # We enforce a sync flush here.
+        if self.write_cache:
+            self._flush_sync()
         for fh in self.file_handles:
             fh['obj'].close()
+        self.io_executor.shutdown()
 
-    def write(self, global_offset: int, data: bytes):
+    async def write(self, global_offset: int, data: bytes):
         """
-        Add data to cache. Flush if threshold reached.
+        Non-blocking write. Adds to cache. If cache full, offloads flush to thread.
         """
         self.write_cache[global_offset] = data
         self.cache_size += len(data)
         
         if self.cache_size >= self.CACHE_THRESHOLD:
-            logging.info(f"Cache full ({self.cache_size/1024/1024:.2f}MB). Flushing to disk...")
-            self.flush()
+            logging.info(f"Cache full ({self.cache_size/1024/1024:.2f}MB). Flushing...")
+            # We schedule the flush but don't wait for it to finish immediately
+            # to keep accepting network data.
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(self.io_executor, self._flush_sync)
 
-    def flush(self):
+    def _flush_sync(self):
         """
-        Sorts cached writes by offset and writes them sequentially to disk.
+        Blocking flush (run in thread).
         """
         if not self.write_cache: return
         
-        # Sort by offset to ensure sequential disk writes (Performance +++)
         sorted_offsets = sorted(self.write_cache.keys())
-        
         for offset in sorted_offsets:
             data = self.write_cache[offset]
-            self._write_to_disk(offset, data)
+            self._write_to_disk_sync(offset, data)
         
         self.write_cache.clear()
         self.cache_size = 0
-        logging.info("Disk flush complete.")
 
-    def _write_to_disk(self, global_offset, data):
-        """
-        Internal method to physically write bytes to file handles.
-        """
+    def _write_to_disk_sync(self, global_offset, data):
         bytes_to_write = len(data)
         current_global_pos = global_offset
         data_cursor = 0
@@ -80,11 +89,8 @@ class FileManager:
             tf = fh['info']
             f = fh['obj']
 
-            if tf.end_offset <= current_global_pos:
-                continue
-            
-            if tf.start_offset >= current_global_pos + bytes_to_write:
-                break 
+            if tf.end_offset <= current_global_pos: continue
+            if tf.start_offset >= current_global_pos + bytes_to_write: break 
 
             file_write_start = max(0, current_global_pos - tf.start_offset)
             file_remaining_cap = tf.length - file_write_start
@@ -94,34 +100,29 @@ class FileManager:
 
             f.seek(file_write_start)
             f.write(chunk)
-            # f.flush() # Removed explicit flush per-write for performance. OS handles it.
-
+            
             current_global_pos += amount_for_file
             data_cursor += amount_for_file
             bytes_to_write -= amount_for_file
 
-            if bytes_to_write <= 0:
-                break
+            if bytes_to_write <= 0: break
 
-    def read(self, global_offset: int, length: int) -> bytes:
+    async def read(self, global_offset: int, length: int) -> bytes:
         """
-        Reads data. Checks RAM Cache first, then Disk.
+        Async read. Checks Cache first (fast), then Disk (thread).
         """
-        # 1. Check Cache (RAM Speed)
-        # Iterate cache to see if the request falls within a cached piece.
-        # Since cache holds ~50-100 items max (pieces), this loop is negligible cost.
+        # 1. Cache Hit?
         for off, data in self.write_cache.items():
             if off <= global_offset < off + len(data):
-                # We found the piece in RAM!
-                start_in_piece = global_offset - off
-                # Check if the request goes beyond this piece (unlikely for blocks)
-                if start_in_piece + length <= len(data):
-                    return data[start_in_piece : start_in_piece + length]
+                start = global_offset - off
+                if start + length <= len(data):
+                    return data[start : start + length]
 
-        # 2. Check Disk (IO Speed)
-        return self._read_from_disk(global_offset, length)
+        # 2. Disk Read (Offload to thread)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.io_executor, self._read_sync, global_offset, length)
 
-    def _read_from_disk(self, global_offset, length):
+    def _read_sync(self, global_offset, length):
         response_data = bytearray()
         bytes_to_read = length
         current_global_pos = global_offset
@@ -130,11 +131,8 @@ class FileManager:
             tf = fh['info']
             f = fh['obj']
 
-            if tf.end_offset <= current_global_pos:
-                continue
-            
-            if tf.start_offset >= current_global_pos + bytes_to_read:
-                break
+            if tf.end_offset <= current_global_pos: continue
+            if tf.start_offset >= current_global_pos + bytes_to_read: break
 
             file_read_start = max(0, current_global_pos - tf.start_offset)
             file_remaining_cap = tf.length - file_read_start
@@ -147,7 +145,6 @@ class FileManager:
             current_global_pos += amount_for_file
             bytes_to_read -= amount_for_file
 
-            if bytes_to_read <= 0:
-                break
+            if bytes_to_read <= 0: break
         
         return bytes(response_data)

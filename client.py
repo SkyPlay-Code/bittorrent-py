@@ -9,54 +9,52 @@ from metadata import MetadataManager
 from peer import PeerConnection
 from nat import NatTraverser
 from utp import UtpManager
-from kademlia import DHT # NEW
+from kademlia import DHT
 
 MAX_PEER_CONNECTIONS = 50  
 MAX_HALF_OPEN = 10         
 
 class TorrentClient:
     def __init__(self, torrent_file):
-        import random
-        self.listen_port = random.randint(10000, 60000)
-        self.utp = UtpManager(port=self.listen_port)
-        self.dht = DHT(self.peers_queue, port=self.listen_port + 1)
-
         self.torrent = Torrent(torrent_file)
         self.tracker = Tracker(self.torrent)
         self.piece_manager = None 
+        
+        # FIX: Define queue FIRST
         self.peers_queue = asyncio.Queue()
+        
         self.workers = []
         self.abort = False
         self.nat = NatTraverser()
         self.dial_semaphore = asyncio.Semaphore(MAX_HALF_OPEN)
-        self.utp = UtpManager(port=6881)
         
-        # NEW: DHT (Use port 6882 to avoid conflict with uTP on 6881)
+        # FIX: Allow dynamic port binding implicitly by OS or explicit logic
+        # For now, default to 6881/6882 as per architecture, but queue must be ready.
+        self.utp = UtpManager(port=6881)
         self.dht = DHT(self.peers_queue, port=6882)
 
     async def start(self):
         logging.info(f"Starting client...")
         
-        # 1. Start uTP
         loop = asyncio.get_running_loop()
-        utp_transport, _ = await loop.create_datagram_endpoint(
-            lambda: self.utp, local_addr=('0.0.0.0', 6881)
-        )
-        self.utp.transport = utp_transport
-        
-        # 2. Start DHT
-        dht_transport, _ = await loop.create_datagram_endpoint(
-            lambda: self.dht, local_addr=('0.0.0.0', 6882)
-        )
-        self.dht.transport = dht_transport
-        asyncio.create_task(self.dht.bootstrap())
+        try:
+            utp_transport, _ = await loop.create_datagram_endpoint(
+                lambda: self.utp, local_addr=('0.0.0.0', 6881)
+            )
+            self.utp.transport = utp_transport
+            
+            dht_transport, _ = await loop.create_datagram_endpoint(
+                lambda: self.dht, local_addr=('0.0.0.0', 6882)
+            )
+            self.dht.transport = dht_transport
+            asyncio.create_task(self.dht.bootstrap())
+        except OSError as e:
+            logging.warning(f"Could not bind UDP ports: {e}. DHT/uTP might fail.")
 
-        # 3. UPnP
         print("Attempting UPnP Port Mapping...")
-        await self.nat.map_port(6881)      # TCP/uTP
-        await self.nat.map_port(6882, "UDP") # DHT
+        await self.nat.map_port(6881)
+        await self.nat.map_port(6882, "UDP")
 
-        # Phase 1: Metadata
         if not self.torrent.loaded:
             print("Magnet Link detected. Fetching Metadata...")
             success = await self._fetch_metadata()
@@ -65,7 +63,6 @@ class TorrentClient:
                 return
             print("Metadata received and verified.")
 
-        # Phase 2: File Download
         print(f"Initializing Download: {self.torrent.output_file}")
         
         self.piece_manager = PieceManager(self.torrent)
@@ -101,8 +98,6 @@ class TorrentClient:
             
         print("Connecting to swarm for metadata...")
         asyncio.create_task(self._announce_wrapper())
-        
-        # NEW: Trigger DHT Search for Metadata
         asyncio.create_task(self._dht_search_loop())
         
         start_time = time.time()
@@ -133,8 +128,6 @@ class TorrentClient:
         last_downloaded = self.piece_manager.downloaded_bytes
         
         print("Connecting to swarm for files...")
-
-        # NEW: Start DHT search loop for files
         asyncio.create_task(self._dht_search_loop())
 
         try:
@@ -178,15 +171,11 @@ class TorrentClient:
             logging.error(f"Tracker announce failed: {e}")
 
     async def _dht_search_loop(self):
-        """
-        Periodically query the DHT for new peers.
-        """
         while not self.abort:
             try:
-                # logging.info("DHT: Searching for peers...")
                 await self.dht.get_peers(self.torrent.info_hash)
             except Exception: pass
-            await asyncio.sleep(30) # Search every 30 seconds
+            await asyncio.sleep(30)
 
     def _render_dashboard(self, downloaded, total, speed, eta, peers):
         if total == 0: return 

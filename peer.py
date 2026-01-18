@@ -4,17 +4,20 @@ import socket
 import logging
 import message
 from bencoding import Decoder, Encoder
-from mse import perform_mse_handshake # NEW
+from mse import perform_mse_handshake
 
 class PeerConnection:
-    def __init__(self, queue, manager, info_hash, peer_id, dial_semaphore=None, is_metadata_mode=False, utp_manager=None):
-        self.utp_manager = utp_manager
+    def __init__(self, queue, manager, info_hash, peer_id, 
+                 dial_semaphore=None, is_metadata_mode=False, 
+                 utp_manager=None, enable_mse=True): # Added enable_mse flag
         self.queue = queue 
         self.manager = manager 
         self.info_hash = info_hash
         self.my_peer_id = peer_id
         self.dial_semaphore = dial_semaphore
         self.is_metadata_mode = is_metadata_mode
+        self.utp_manager = utp_manager
+        self.enable_mse = enable_mse # Store flag
         self.remote_peer_id = None
         
         self.reader = None
@@ -25,6 +28,10 @@ class PeerConnection:
         self.remote_extensions = {} 
         self.supports_extensions = False
         self.remote_metadata_size = 0
+        
+        # PEX State
+        self.sent_peers = set()
+        self.pex_task = None
         
         # State
         self.peer_choking = True      
@@ -59,26 +66,19 @@ class PeerConnection:
             else:
                 await self._establish_socket()
 
-            # --- ENCRYPTION ATTEMPT ---
-            # Try to upgrade the socket to an EncryptedConnection
-            # BEP 8 Handshake
-            encrypted_conn = await perform_mse_handshake(self.reader, self.writer, self.info_hash)
-            
-            if encrypted_conn:
-                logging.info(f"Encryption enabled for {self.ip}")
-                # Replace raw reader/writer with the wrapper
-                # wrapper has .readexactly, .write, .drain just like asyncio streams
-                self.reader = encrypted_conn
-                self.writer = encrypted_conn
-            else:
-                logging.debug(f"Encryption failed/not supported for {self.ip}, falling back to plain.")
+            # MSE Handshake (Only if enabled)
+            if self.enable_mse:
+                encrypted_conn = await perform_mse_handshake(self.reader, self.writer, self.info_hash)
+                if encrypted_conn:
+                    self.reader = encrypted_conn
+                    self.writer = encrypted_conn
 
-            # --- STANDARD PROTOCOL ---
-            
             await asyncio.wait_for(self._perform_handshake(), timeout=10)
             
             if self.supports_extensions:
                 await self._send_extended_handshake()
+                # Start PEX Broadcaster
+                self.pex_task = asyncio.create_task(self._pex_heartbeat())
             
             if not self.is_metadata_mode:
                 await self._send_interested()
@@ -104,17 +104,13 @@ class PeerConnection:
         await self.writer.drain()
         
         data = await self.reader.readexactly(68)
+        if data[1:20] != b'BitTorrent protocol': raise ValueError("Unknown protocol")
         
-        if data[1:20] != b'BitTorrent protocol':
-             raise ValueError("Unknown protocol")
-             
         reserved_byte_5 = data[25]
-        if reserved_byte_5 & 0x10:
-            self.supports_extensions = True
-            
-        if data[28:48] != self.info_hash:
-            raise ValueError("Info hash mismatch")
-            
+        if reserved_byte_5 & 0x10: self.supports_extensions = True
+        
+        if data[28:48] != self.info_hash: raise ValueError("Info hash mismatch")
+        
         self.remote_peer_id = data[48:]
 
     async def _send_extended_handshake(self):
@@ -134,49 +130,69 @@ class PeerConnection:
         await self.writer.drain()
         self.am_choking = False
 
+    async def _pex_heartbeat(self):
+        while True:
+            await asyncio.sleep(60) 
+            if not self.supports_extensions or b'ut_pex' not in self.remote_extensions: continue
+            
+            active_peers = self.manager.get_active_peers()
+            added = []
+            for ip, port in active_peers:
+                peer_tuple = (ip, port)
+                if peer_tuple == (self.ip, self.port): continue
+                if peer_tuple not in self.sent_peers:
+                    added.append(peer_tuple)
+            added = added[:50]
+            if added:
+                self._send_pex_message(added)
+                for p in added: self.sent_peers.add(p)
+
+    def _send_pex_message(self, added_peers):
+        added_binary = b''
+        for ip, port in added_peers:
+            try: added_binary += socket.inet_aton(ip) + struct.pack(">H", port)
+            except: pass
+        flags = b'\x00' * len(added_peers)
+        payload = {b'added': added_binary, b'added.f': flags}
+        encoded_payload = Encoder(payload).encode()
+        ext_id = self.remote_extensions[b'ut_pex']
+        msg = message.ExtendedMessage(ext_id, encoded_payload)
+        self.writer.write(msg.encode())
+
     async def _message_iterator(self):
         while True:
             try:
                 length_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=120)
                 length = struct.unpack(">I", length_data)[0]
-                
                 if length == 0: continue
-                
                 id_data = await asyncio.wait_for(self.reader.readexactly(1), timeout=120)
                 msg_id = id_data[0]
-                
                 payload_length = length - 1
                 payload = b''
                 if payload_length > 0:
                     payload = await asyncio.wait_for(self.reader.readexactly(payload_length), timeout=120)
-                
                 yield message.PeerMessage(msg_id, payload)
-            except Exception:
-                break
+            except Exception: break
 
     async def _handle_message(self, msg):
         if msg.msg_id == message.EXTENDED:
             await self._handle_extended_message(msg.payload)
             return
+        if self.is_metadata_mode: return
 
-        if self.is_metadata_mode:
-            return
-
-        if msg.msg_id == message.CHOKE:
-            self.peer_choking = True
+        if msg.msg_id == message.CHOKE: self.peer_choking = True
         elif msg.msg_id == message.UNCHOKE:
             self.peer_choking = False
             await self._request_piece()
         elif msg.msg_id == message.INTERESTED:
             self.peer_interested = True
             await self._send_unchoke()
-        elif msg.msg_id == message.NOT_INTERESTED:
-            self.peer_interested = False
+        elif msg.msg_id == message.NOT_INTERESTED: self.peer_interested = False
         elif msg.msg_id == message.HAVE:
             index = struct.unpack(">I", msg.payload)[0]
             self.manager.update_peer(self.remote_peer_id, index)
         elif msg.msg_id == message.BITFIELD:
-            self.manager.add_peer(self.remote_peer_id, msg.payload)
+            self.manager.add_peer(self.remote_peer_id, msg.payload, self.ip, self.port)
             await self._request_piece()
         elif msg.msg_id == message.REQUEST:
             index, begin, length = struct.unpack(">III", msg.payload)
@@ -191,20 +207,15 @@ class PeerConnection:
     async def _handle_extended_message(self, payload):
         ext_id = payload[0]
         data = payload[1:]
-        
-        if ext_id == 0:
-            self._handle_ext_handshake(data)
+        if ext_id == 0: self._handle_ext_handshake(data)
         else:
             ext_name = None
             for name, remote_id in self.remote_extensions.items():
                 if remote_id == ext_id:
                     ext_name = name
                     break
-            
-            if ext_name == b'ut_pex':
-                self._handle_pex(data)
-            elif ext_name == b'ut_metadata':
-                await self._handle_ut_metadata(data)
+            if ext_name == b'ut_pex': self._handle_pex(data)
+            elif ext_name == b'ut_metadata': await self._handle_ut_metadata(data)
 
     def _handle_ext_handshake(self, data):
         try:
@@ -216,14 +227,14 @@ class PeerConnection:
                 if self.is_metadata_mode:
                     self.manager.set_size(self.remote_metadata_size)
                     asyncio.create_task(self._request_metadata_piece())
-        except Exception:
-            pass
+            
+            self.manager.add_peer(self.remote_peer_id, [], self.ip, self.port)
+        except Exception: pass
 
     def _handle_pex(self, data):
         try:
             pex_dict = Decoder(data).decode()
-            if b'added' in pex_dict:
-                self._parse_and_add_peers(pex_dict[b'added'])
+            if b'added' in pex_dict: self._parse_and_add_peers(pex_dict[b'added'])
         except Exception: pass
 
     async def _handle_ut_metadata(self, data):
@@ -232,20 +243,16 @@ class PeerConnection:
             msg_dict = decoder.decode()
             msg_type = msg_dict[b'msg_type']
             piece_index = msg_dict[b'piece']
-            
             if msg_type == 1: 
                 payload = decoder._data[decoder._index:]
                 if self.is_metadata_mode:
                     self.manager.receive_data(piece_index, payload)
-                    if not self.manager.complete:
-                        await self._request_metadata_piece()
-        except Exception:
-            pass
+                    if not self.manager.complete: await self._request_metadata_piece()
+        except Exception: pass
 
     async def _request_metadata_piece(self):
         if not self.is_metadata_mode or not self.manager.active: return
         if b'ut_metadata' not in self.remote_extensions: return
-        
         index = self.manager.get_next_request()
         if index is not None:
             req = {b'msg_type': 0, b'piece': index}
@@ -283,6 +290,8 @@ class PeerConnection:
             await self.writer.drain()
 
     def stop(self):
+        if self.pex_task: self.pex_task.cancel()
+        if self.remote_peer_id: self.manager.remove_peer(self.remote_peer_id)
         if self.writer:
             try: self.writer.close()
             except Exception: pass

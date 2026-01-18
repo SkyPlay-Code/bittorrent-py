@@ -33,7 +33,7 @@ class TestUploading(unittest.IsolatedAsyncioTestCase):
             writer.write(msg_int.encode())
             await writer.drain()
             
-            # 3. Wait for UNCHOKE (Client should unchoke us because we are interested)
+            # 3. Wait for UNCHOKE
             while True:
                 len_data = await reader.read(4)
                 length = struct.unpack(">I", len_data)[0]
@@ -44,23 +44,19 @@ class TestUploading(unittest.IsolatedAsyncioTestCase):
                 if msg_id == message.UNCHOKE:
                     break
             
-            # 4. Request Piece 0, Block 0 (Length 16384)
-            # Client has Piece 0 (mocked below)
+            # 4. Request Piece 0
             req = message.Request(0, 0, 16384)
             writer.write(req.encode())
             await writer.drain()
             
             # 5. Expect PIECE message
-            # Len(4) + ID(1) + Index(4) + Begin(4) + Data(16384)
-            # Total Header = 9 bytes + 16384 = 16393
-            resp_header = await reader.read(13) # Len(4) + ID(1) + Index(4) + Begin(4)
+            resp_header = await reader.read(13) 
             resp_len = struct.unpack(">I", resp_header[0:4])[0]
             resp_id = resp_header[4]
             
             if resp_id == message.PIECE:
                 self.piece_received = True
             
-            # Consume rest
             await reader.read(resp_len - 9)
             
             await asyncio.sleep(0.1)
@@ -74,12 +70,11 @@ class TestUploading(unittest.IsolatedAsyncioTestCase):
         queue = asyncio.Queue()
         queue.put_nowait(('127.0.0.1', 8888))
         
-        # Mock PieceManager
         pm = MagicMock()
-        # Mock read_block to return dummy data
         pm.read_block.return_value = b'A' * 16384
         
-        pc = PeerConnection(queue, pm, self.server_info_hash, b'-PC0001-TEST00000000')
+        # DISABLE MSE
+        pc = PeerConnection(queue, pm, self.server_info_hash, b'-PC0001-TEST00000000', enable_mse=False)
         
         task = asyncio.create_task(pc.run())
         

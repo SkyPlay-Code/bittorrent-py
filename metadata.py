@@ -2,7 +2,7 @@ import math
 import hashlib
 import logging
 
-METADATA_BLOCK_SIZE = 16 * 1024 # 16KB
+METADATA_BLOCK_SIZE = 16 * 1024 
 
 class MetadataManager:
     """
@@ -16,6 +16,7 @@ class MetadataManager:
         self.active = False
         self.complete = False
         self.raw_data = None
+        self.active_peers = {} # peer_id -> (ip, port) [NEW]
 
     def set_size(self, size):
         if self.size > 0: return 
@@ -35,21 +36,28 @@ class MetadataManager:
     def receive_data(self, piece_index, data):
         if not self.active or piece_index >= self.num_pieces: return
         self.pieces[piece_index] = data
-        
-        if all(p is not None for p in self.pieces):
-            self._verify()
+        if all(p is not None for p in self.pieces): self._verify()
 
     def update_peer(self, peer_id, index):
-        # Metadata manager doesn't track peer have/bitfield for files
-        # It relies on Extension Handshake which we handle in PeerConnection
         pass
 
-    def add_peer(self, peer_id, payload):
-        pass
+    # Updated signature to match PieceManager
+    def add_peer(self, peer_id, payload, ip=None, port=None):
+        if ip and port:
+            self.active_peers[peer_id] = (ip, port)
+
+    def remove_peer(self, peer_id):
+        if peer_id in self.active_peers:
+            del self.active_peers[peer_id]
+
+    def get_active_peers(self):
+        return list(self.active_peers.values())
 
     def block_received(self, peer_id, index, begin, data):
-        # Peer sent a normal block during metadata phase? Ignore.
         pass
+
+    def read_block(self, index, begin, length):
+        return None
 
     def _verify(self):
         raw_metadata = b''.join(self.pieces)

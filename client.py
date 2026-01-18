@@ -10,6 +10,7 @@ from peer import PeerConnection
 from nat import NatTraverser
 from utp import UtpManager
 from kademlia import DHT
+from connection_manager import ConnectionManager # NEW
 
 MAX_PEER_CONNECTIONS = 50  
 MAX_HALF_OPEN = 10         
@@ -19,56 +20,59 @@ class TorrentClient:
         self.torrent = Torrent(torrent_file)
         self.tracker = Tracker(self.torrent)
         self.piece_manager = None 
-        
-        # FIX: Define queue FIRST
         self.peers_queue = asyncio.Queue()
-        
         self.workers = []
         self.abort = False
         self.nat = NatTraverser()
         self.dial_semaphore = asyncio.Semaphore(MAX_HALF_OPEN)
-        
-        # FIX: Allow dynamic port binding implicitly by OS or explicit logic
-        # For now, default to 6881/6882 as per architecture, but queue must be ready.
         self.utp = UtpManager(port=6881)
         self.dht = DHT(self.peers_queue, port=6882)
+        
+        # NEW: Connection Manager (Choker)
+        self.conn_manager = None 
 
     async def start(self):
         logging.info(f"Starting client...")
         
+        # ... UDP / DHT / UPnP Init ...
         loop = asyncio.get_running_loop()
         try:
             utp_transport, _ = await loop.create_datagram_endpoint(
                 lambda: self.utp, local_addr=('0.0.0.0', 6881)
             )
             self.utp.transport = utp_transport
-            
             dht_transport, _ = await loop.create_datagram_endpoint(
                 lambda: self.dht, local_addr=('0.0.0.0', 6882)
             )
             self.dht.transport = dht_transport
             asyncio.create_task(self.dht.bootstrap())
         except OSError as e:
-            logging.warning(f"Could not bind UDP ports: {e}. DHT/uTP might fail.")
+            logging.warning(f"UDP Error: {e}")
 
         print("Attempting UPnP Port Mapping...")
         await self.nat.map_port(6881)
         await self.nat.map_port(6882, "UDP")
 
+        # Phase 1: Metadata
         if not self.torrent.loaded:
             print("Magnet Link detected. Fetching Metadata...")
             success = await self._fetch_metadata()
             if not success:
-                print("Failed to retrieve metadata. Exiting.")
+                print("Failed. Exiting.")
                 return
             print("Metadata received and verified.")
 
+        # Phase 2: File Download
         print(f"Initializing Download: {self.torrent.output_file}")
         
         self.piece_manager = PieceManager(self.torrent)
         
+        # Initialize Connection Manager
+        self.conn_manager = ConnectionManager(self.piece_manager)
+        self.conn_manager.start()
+        
         if self.piece_manager.complete:
-            print("Download already complete! Seeding...")
+            print("Download complete! Seeding...")
         elif self.piece_manager.downloaded_bytes > 0:
             percent = (self.piece_manager.downloaded_bytes / self.torrent.total_size) * 100
             print(f"Resuming from {percent:.2f}%")
@@ -78,7 +82,8 @@ class TorrentClient:
             worker = PeerConnection(self.peers_queue, self.piece_manager, 
                                     self.torrent.info_hash, self.tracker.peer_id,
                                     dial_semaphore=self.dial_semaphore,
-                                    utp_manager=self.utp)
+                                    utp_manager=self.utp,
+                                    conn_manager=self.conn_manager) # Pass Manager
             task = asyncio.create_task(worker.run())
             self.workers.append(task)
 
@@ -86,7 +91,7 @@ class TorrentClient:
 
     async def _fetch_metadata(self):
         meta_manager = MetadataManager(self.torrent.info_hash)
-        
+        # Metadata Phase doesn't use complex choking, pass None for conn_manager
         for _ in range(MAX_PEER_CONNECTIONS):
             worker = PeerConnection(self.peers_queue, meta_manager, 
                                     self.torrent.info_hash, self.tracker.peer_id,
@@ -96,7 +101,7 @@ class TorrentClient:
             task = asyncio.create_task(worker.run())
             self.workers.append(task)
             
-        print("Connecting to swarm for metadata...")
+        print("Connecting for metadata...")
         asyncio.create_task(self._announce_wrapper())
         asyncio.create_task(self._dht_search_loop())
         
@@ -105,11 +110,9 @@ class TorrentClient:
             if time.time() - start_time > 60:
                  asyncio.create_task(self._announce_wrapper())
                  start_time = time.time()
-            
-            sys.stdout.write(f"\rPeers: {self.peers_queue.qsize()} | Metadata: {'Searching...' if not meta_manager.active else f'{sum(1 for p in meta_manager.pieces if p)}/{meta_manager.num_pieces}'}   ")
+            sys.stdout.write(f"\rPeers: {self.peers_queue.qsize()} | Metadata: {sum(1 for p in meta_manager.pieces if p)}/{meta_manager.num_pieces}   ")
             sys.stdout.flush()
             await asyncio.sleep(1)
-            
         print() 
         if self.abort: return False
         
@@ -127,14 +130,13 @@ class TorrentClient:
         last_time = time.time()
         last_downloaded = self.piece_manager.downloaded_bytes
         
-        print("Connecting to swarm for files...")
+        print("Connecting to swarm...")
         asyncio.create_task(self._dht_search_loop())
 
         try:
             while not self.abort:
                 now = time.time()
                 if (now - previous_announce) >= interval:
-                    logging.info("Announcing to tracker...")
                     asyncio.create_task(self._announce_wrapper())
                     previous_announce = now
                 
@@ -168,12 +170,11 @@ class TorrentClient:
             if peers:
                 for peer in peers: await self.peers_queue.put(peer)
         except Exception as e:
-            logging.error(f"Tracker announce failed: {e}")
+            logging.error(f"Tracker: {e}")
 
     async def _dht_search_loop(self):
         while not self.abort:
-            try:
-                await self.dht.get_peers(self.torrent.info_hash)
+            try: await self.dht.get_peers(self.torrent.info_hash)
             except Exception: pass
             await asyncio.sleep(30)
 
@@ -196,6 +197,7 @@ class TorrentClient:
 
     def stop(self):
         self.abort = True
+        if self.conn_manager: self.conn_manager.stop()
         for task in self.workers:
             task.cancel()
         if self.piece_manager:

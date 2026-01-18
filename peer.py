@@ -4,6 +4,7 @@ import socket
 import logging
 import message
 from bencoding import Decoder, Encoder
+from mse import perform_mse_handshake # NEW
 
 class PeerConnection:
     def __init__(self, queue, manager, info_hash, peer_id, dial_semaphore=None, is_metadata_mode=False):
@@ -11,7 +12,7 @@ class PeerConnection:
         self.manager = manager 
         self.info_hash = info_hash
         self.my_peer_id = peer_id
-        self.dial_semaphore = dial_semaphore # New: Flow control
+        self.dial_semaphore = dial_semaphore
         self.is_metadata_mode = is_metadata_mode
         self.remote_peer_id = None
         
@@ -51,16 +52,27 @@ class PeerConnection:
 
     async def _connect_and_loop(self):
         try:
-            # CRITICAL: Router Protection
-            # Only allow N workers to be in the "Dialing" phase at once.
             if self.dial_semaphore:
                 async with self.dial_semaphore:
                     await self._establish_socket()
             else:
                 await self._establish_socket()
 
-            # Connection Established -> Now we are "Connected" (not half-open)
-            # We can proceed with the protocol.
+            # --- ENCRYPTION ATTEMPT ---
+            # Try to upgrade the socket to an EncryptedConnection
+            # BEP 8 Handshake
+            encrypted_conn = await perform_mse_handshake(self.reader, self.writer, self.info_hash)
+            
+            if encrypted_conn:
+                logging.info(f"Encryption enabled for {self.ip}")
+                # Replace raw reader/writer with the wrapper
+                # wrapper has .readexactly, .write, .drain just like asyncio streams
+                self.reader = encrypted_conn
+                self.writer = encrypted_conn
+            else:
+                logging.debug(f"Encryption failed/not supported for {self.ip}, falling back to plain.")
+
+            # --- STANDARD PROTOCOL ---
             
             await asyncio.wait_for(self._perform_handshake(), timeout=10)
             
@@ -81,10 +93,6 @@ class PeerConnection:
             logging.error(f"Error {self.ip}: {e}")
 
     async def _establish_socket(self):
-        """
-        Opens the TCP connection. 
-        Wrapped by semaphore in _connect_and_loop to limit half-open states.
-        """
         self.reader, self.writer = await asyncio.wait_for(
             asyncio.open_connection(self.ip, self.port), timeout=10
         )

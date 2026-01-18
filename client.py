@@ -8,12 +8,19 @@ from piece_manager import PieceManager
 from metadata import MetadataManager
 from peer import PeerConnection
 from nat import NatTraverser
+from utp import UtpManager
+from kademlia import DHT # NEW
 
 MAX_PEER_CONNECTIONS = 50  
 MAX_HALF_OPEN = 10         
 
 class TorrentClient:
     def __init__(self, torrent_file):
+        import random
+        self.listen_port = random.randint(10000, 60000)
+        self.utp = UtpManager(port=self.listen_port)
+        self.dht = DHT(self.peers_queue, port=self.listen_port + 1)
+
         self.torrent = Torrent(torrent_file)
         self.tracker = Tracker(self.torrent)
         self.piece_manager = None 
@@ -22,13 +29,32 @@ class TorrentClient:
         self.abort = False
         self.nat = NatTraverser()
         self.dial_semaphore = asyncio.Semaphore(MAX_HALF_OPEN)
+        self.utp = UtpManager(port=6881)
+        
+        # NEW: DHT (Use port 6882 to avoid conflict with uTP on 6881)
+        self.dht = DHT(self.peers_queue, port=6882)
 
     async def start(self):
         logging.info(f"Starting client...")
         
-        # UPnP
+        # 1. Start uTP
+        loop = asyncio.get_running_loop()
+        utp_transport, _ = await loop.create_datagram_endpoint(
+            lambda: self.utp, local_addr=('0.0.0.0', 6881)
+        )
+        self.utp.transport = utp_transport
+        
+        # 2. Start DHT
+        dht_transport, _ = await loop.create_datagram_endpoint(
+            lambda: self.dht, local_addr=('0.0.0.0', 6882)
+        )
+        self.dht.transport = dht_transport
+        asyncio.create_task(self.dht.bootstrap())
+
+        # 3. UPnP
         print("Attempting UPnP Port Mapping...")
-        await self.nat.map_port(6881)
+        await self.nat.map_port(6881)      # TCP/uTP
+        await self.nat.map_port(6882, "UDP") # DHT
 
         # Phase 1: Metadata
         if not self.torrent.loaded:
@@ -42,10 +68,8 @@ class TorrentClient:
         # Phase 2: File Download
         print(f"Initializing Download: {self.torrent.output_file}")
         
-        # This will trigger the Resume Check / Recheck
         self.piece_manager = PieceManager(self.torrent)
         
-        # Calculate initial completion
         if self.piece_manager.complete:
             print("Download already complete! Seeding...")
         elif self.piece_manager.downloaded_bytes > 0:
@@ -56,7 +80,8 @@ class TorrentClient:
         for _ in range(MAX_PEER_CONNECTIONS): 
             worker = PeerConnection(self.peers_queue, self.piece_manager, 
                                     self.torrent.info_hash, self.tracker.peer_id,
-                                    dial_semaphore=self.dial_semaphore)
+                                    dial_semaphore=self.dial_semaphore,
+                                    utp_manager=self.utp)
             task = asyncio.create_task(worker.run())
             self.workers.append(task)
 
@@ -69,12 +94,16 @@ class TorrentClient:
             worker = PeerConnection(self.peers_queue, meta_manager, 
                                     self.torrent.info_hash, self.tracker.peer_id,
                                     dial_semaphore=self.dial_semaphore,
-                                    is_metadata_mode=True)
+                                    is_metadata_mode=True,
+                                    utp_manager=self.utp)
             task = asyncio.create_task(worker.run())
             self.workers.append(task)
             
         print("Connecting to swarm for metadata...")
         asyncio.create_task(self._announce_wrapper())
+        
+        # NEW: Trigger DHT Search for Metadata
+        asyncio.create_task(self._dht_search_loop())
         
         start_time = time.time()
         while not meta_manager.complete and not self.abort:
@@ -87,36 +116,30 @@ class TorrentClient:
             await asyncio.sleep(1)
             
         print() 
-        
         if self.abort: return False
         
         self.torrent.load_metadata(meta_manager.raw_data)
-        
         for task in self.workers: task.cancel()
         self.workers = []
-        
         while not self.peers_queue.empty():
             try: self.peers_queue.get_nowait()
             except: break
-            
         return True
 
     async def _download_loop(self):
         previous_announce = 0
         interval = 30 * 60 
         last_time = time.time()
-        last_downloaded = self.piece_manager.downloaded_bytes # Init correctly
+        last_downloaded = self.piece_manager.downloaded_bytes
         
         print("Connecting to swarm for files...")
 
+        # NEW: Start DHT search loop for files
+        asyncio.create_task(self._dht_search_loop())
+
         try:
-            # Loop runs if incomplete OR if complete (seeding mode)
             while not self.abort:
                 now = time.time()
-                
-                # Exit if complete and you want to stop? 
-                # Usually clients seed forever. Let's seed forever.
-                
                 if (now - previous_announce) >= interval:
                     logging.info("Announcing to tracker...")
                     asyncio.create_task(self._announce_wrapper())
@@ -138,7 +161,6 @@ class TorrentClient:
                     self._render_dashboard(current_downloaded, total_size, speed, eta_seconds, self.peers_queue.qsize())
 
                 await asyncio.sleep(0.5)
-            
         except asyncio.CancelledError:
             print("\nStopped.")
         finally:
@@ -149,14 +171,22 @@ class TorrentClient:
             downloaded = 0
             if self.piece_manager:
                 downloaded = self.piece_manager.downloaded_bytes
-                
             peers = await self.tracker.connect(downloaded=downloaded)
             if peers:
-                logging.info(f"Tracker returned {len(peers)} peers")
-                for peer in peers:
-                    await self.peers_queue.put(peer)
+                for peer in peers: await self.peers_queue.put(peer)
         except Exception as e:
             logging.error(f"Tracker announce failed: {e}")
+
+    async def _dht_search_loop(self):
+        """
+        Periodically query the DHT for new peers.
+        """
+        while not self.abort:
+            try:
+                # logging.info("DHT: Searching for peers...")
+                await self.dht.get_peers(self.torrent.info_hash)
+            except Exception: pass
+            await asyncio.sleep(30) # Search every 30 seconds
 
     def _render_dashboard(self, downloaded, total, speed, eta, peers):
         if total == 0: return 
@@ -164,18 +194,14 @@ class TorrentClient:
         bar_len = 30
         filled_len = int(bar_len * percent // 100)
         bar = '=' * filled_len + '-' * (bar_len - filled_len)
-        
         if speed < 1024: speed_str = f"{speed:.0f} B/s"
         elif speed < 1024**2: speed_str = f"{speed/1024:.2f} KB/s"
         else: speed_str = f"{speed/1024**2:.2f} MB/s"
-            
         if eta == 0 and percent < 100: eta_str = "∞"
         elif eta < 60: eta_str = f"{int(eta)}s"
         elif eta < 3600: eta_str = f"{int(eta//60)}m {int(eta%60)}s"
         else: eta_str = f"{int(eta//3600)}h {int((eta%3600)//60)}m"
-
         status = "Seeding" if downloaded == total else "Downloading"
-        
         sys.stdout.write(f"\r[{bar}] {percent:.2f}% | {speed_str} | ETA: {eta_str} | Peers: {peers} | {status}   ")
         sys.stdout.flush()
 

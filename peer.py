@@ -7,7 +7,8 @@ from bencoding import Decoder, Encoder
 from mse import perform_mse_handshake # NEW
 
 class PeerConnection:
-    def __init__(self, queue, manager, info_hash, peer_id, dial_semaphore=None, is_metadata_mode=False):
+    def __init__(self, queue, manager, info_hash, peer_id, dial_semaphore=None, is_metadata_mode=False, utp_manager=None):
+        self.utp_manager = utp_manager
         self.queue = queue 
         self.manager = manager 
         self.info_hash = info_hash

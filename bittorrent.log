@@ -1,35 +1,72 @@
-2026-01-18 09:14:14,039 - INFO - Starting client...
-2026-01-18 09:14:14,052 - INFO - Attempting UPnP Port Mapping for 6881 (TCP)...
-2026-01-18 09:14:14,053 - INFO - UPnP: Sending SSDP discovery...
-2026-01-18 09:14:17,068 - WARNING - UPnP: SSDP Discovery Timed out
-2026-01-18 09:14:17,081 - WARNING - UPnP: No Gateway found.
-2026-01-18 09:14:17,082 - INFO - Connecting to UDP tracker: udp://explodie.org:6969
-2026-01-18 09:14:21,181 - INFO - Connecting to UDP tracker: udp://tracker.coppersurfer.tk:6969
-2026-01-18 09:14:25,233 - INFO - Connecting to UDP tracker: udp://tracker.empire-js.us:1337
-2026-01-18 09:14:26,297 - INFO - Tracker returned 1 peers
-2026-01-18 09:14:27,555 - INFO - Metadata download started. Size: 17230 bytes, Pieces: 2
-2026-01-18 09:15:17,636 - INFO - Connecting to UDP tracker: udp://explodie.org:6969
-2026-01-18 09:15:21,998 - INFO - Connecting to UDP tracker: udp://tracker.coppersurfer.tk:6969
-2026-01-18 09:15:26,002 - INFO - Connecting to UDP tracker: udp://tracker.empire-js.us:1337
-2026-01-18 09:15:26,657 - INFO - Tracker returned 1 peers
-2026-01-18 09:16:18,197 - INFO - Connecting to UDP tracker: udp://explodie.org:6969
-2026-01-18 09:16:18,915 - INFO - Tracker returned 31 peers
-2026-01-18 09:16:20,343 - INFO - Metadata verified successfully.
-2026-01-18 09:16:20,632 - INFO - Metadata verified successfully.
-2026-01-18 09:16:22,388 - INFO - Announcing to tracker...
-2026-01-18 09:16:22,403 - INFO - Connecting to UDP tracker: udp://explodie.org:6969
-2026-01-18 09:16:26,767 - INFO - Connecting to UDP tracker: udp://tracker.coppersurfer.tk:6969
-2026-01-18 09:16:30,777 - INFO - Connecting to UDP tracker: udp://tracker.empire-js.us:1337
-2026-01-18 09:16:31,453 - INFO - Tracker returned 10 peers
-2026-01-18 09:16:36,457 - INFO - Piece 0 verified.
-2026-01-18 09:16:39,999 - INFO - Piece 1 verified.
-2026-01-18 09:16:42,131 - ERROR - Error 81.171.17.64: 0 bytes read on a total of 68 expected bytes
-2026-01-18 09:16:42,559 - INFO - Piece 2 verified.
-2026-01-18 09:16:44,606 - INFO - Piece 3 verified.
-2026-01-18 09:16:47,382 - INFO - Piece 4 verified.
-2026-01-18 09:16:49,203 - INFO - Piece 5 verified.
-2026-01-18 09:16:50,570 - INFO - Piece 6 verified.
-2026-01-18 09:16:53,234 - INFO - Piece 7 verified.
-2026-01-18 09:16:55,636 - INFO - Piece 8 verified.
-2026-01-18 09:17:04,968 - INFO - Piece 9 verified.
-2026-01-18 09:17:13,442 - INFO - Piece 10 verified.
+2026-01-18 09:31:11,629 - INFO - Starting client...
+2026-01-18 09:31:11,630 - INFO - Attempting UPnP Port Mapping for 6881 (TCP)...
+2026-01-18 09:31:11,630 - INFO - UPnP: Sending SSDP discovery...
+2026-01-18 09:31:14,638 - WARNING - UPnP: SSDP Discovery Timed out
+2026-01-18 09:31:14,651 - WARNING - UPnP: No Gateway found.
+2026-01-18 09:31:14,653 - INFO - Connecting to UDP tracker: udp://explodie.org:6969
+2026-01-18 09:31:18,682 - INFO - Connecting to UDP tracker: udp://tracker.coppersurfer.tk:6969
+2026-01-18 09:31:22,698 - INFO - Connecting to UDP tracker: udp://tracker.empire-js.us:1337
+2026-01-18 09:31:23,793 - INFO - Tracker returned 1 peers
+2026-01-18 09:32:15,128 - INFO - Connecting to UDP tracker: udp://explodie.org:6969
+2026-01-18 09:32:19,132 - INFO - Connecting to UDP tracker: udp://tracker.coppersurfer.tk:6969
+2026-01-18 09:32:23,149 - INFO - Connecting to UDP tracker: udp://tracker.empire-js.us:1337
+2026-01-18 09:32:23,820 - INFO - Tracker returned 1 peers
+2026-01-18 09:32:24,953 - INFO - Metadata download started. Size: 17230 bytes, Pieces: 2
+2026-01-18 09:32:26,811 - INFO - Metadata verified successfully.
+2026-01-18 09:32:28,262 - INFO - Announcing to tracker...
+2026-01-18 09:32:28,266 - INFO - Connecting to UDP tracker: udp://explodie.org:6969
+2026-01-18 09:32:28,953 - INFO - Tracker returned 32 peers
+2026-01-18 09:32:29,962 - ERROR - Error 81.171.17.64: 0 bytes read on a total of 68 expected bytes
+2026-01-18 09:32:33,340 - INFO - Piece 0 verified.
+2026-01-18 09:32:35,011 - INFO - Piece 840 verified.
+2026-01-18 09:32:35,491 - INFO - Piece 842 verified.
+2026-01-18 09:32:36,471 - INFO - Piece 841 verified.
+2026-01-18 09:32:37,969 - INFO - Piece 1 verified.
+2026-01-18 09:32:39,632 - INFO - Piece 2 verified.
+2026-01-18 09:32:39,688 - ERROR - Error 72.175.113.91: 0 bytes read on a total of 68 expected bytes
+2026-01-18 09:32:40,762 - INFO - Piece 3 verified.
+2026-01-18 09:32:42,240 - INFO - Piece 4 verified.
+2026-01-18 09:32:46,466 - INFO - Piece 6 verified.
+2026-01-18 09:32:47,237 - INFO - Piece 5 verified.
+2026-01-18 09:32:49,405 - INFO - Piece 7 verified.
+2026-01-18 09:32:49,646 - ERROR - Error 81.171.17.64: 0 bytes read on a total of 68 expected bytes
+2026-01-18 09:32:50,916 - INFO - Piece 8 verified.
+2026-01-18 09:32:52,844 - INFO - Piece 9 verified.
+2026-01-18 09:32:53,967 - INFO - Piece 10 verified.
+2026-01-18 09:32:56,739 - INFO - Piece 11 verified.
+2026-01-18 09:33:00,400 - INFO - Piece 12 verified.
+2026-01-18 09:33:02,376 - INFO - Piece 13 verified.
+2026-01-18 09:33:03,946 - INFO - Piece 14 verified.
+2026-01-18 09:33:05,125 - INFO - Piece 15 verified.
+2026-01-18 09:33:07,476 - INFO - Piece 16 verified.
+2026-01-18 09:33:08,251 - INFO - Piece 17 verified.
+2026-01-18 09:33:11,377 - INFO - Piece 18 verified.
+2026-01-18 09:33:12,942 - INFO - Piece 19 verified.
+2026-01-18 09:33:16,012 - INFO - Piece 20 verified.
+2026-01-18 09:33:18,061 - INFO - Piece 21 verified.
+2026-01-18 09:33:21,231 - INFO - Piece 22 verified.
+2026-01-18 09:33:23,176 - INFO - Piece 23 verified.
+2026-01-18 09:33:25,090 - INFO - Piece 24 verified.
+2026-01-18 09:33:28,715 - INFO - Piece 25 verified.
+2026-01-18 09:33:29,054 - INFO - Piece 26 verified.
+2026-01-18 09:33:33,361 - INFO - Piece 27 verified.
+2026-01-18 09:33:36,182 - INFO - Piece 28 verified.
+2026-01-18 09:33:37,697 - INFO - Piece 29 verified.
+2026-01-18 09:33:40,740 - INFO - Piece 30 verified.
+2026-01-18 09:33:43,235 - INFO - Piece 31 verified.
+2026-01-18 09:33:43,510 - INFO - Piece 32 verified.
+2026-01-18 09:33:46,070 - INFO - Piece 34 verified.
+2026-01-18 09:33:46,766 - INFO - Piece 33 verified.
+2026-01-18 09:33:50,619 - INFO - Piece 35 verified.
+2026-01-18 09:33:51,937 - INFO - Piece 36 verified.
+2026-01-18 09:33:53,820 - INFO - Piece 37 verified.
+2026-01-18 09:33:56,642 - INFO - Piece 38 verified.
+2026-01-18 09:33:58,208 - INFO - Piece 39 verified.
+2026-01-18 09:34:00,891 - INFO - Piece 40 verified.
+2026-01-18 09:34:02,022 - INFO - Piece 41 verified.
+2026-01-18 09:34:04,421 - INFO - Piece 42 verified.
+2026-01-18 09:34:05,133 - INFO - Piece 43 verified.
+2026-01-18 09:34:07,943 - INFO - Piece 44 verified.
+2026-01-18 09:34:09,088 - INFO - Piece 45 verified.
+2026-01-18 09:34:11,478 - INFO - Piece 46 verified.
+2026-01-18 09:34:13,652 - INFO - Piece 47 verified.

@@ -6,12 +6,12 @@ import message
 from bencoding import Decoder, Encoder
 
 class PeerConnection:
-    def __init__(self, queue, manager, info_hash, peer_id, is_metadata_mode=False):
+    def __init__(self, queue, manager, info_hash, peer_id, dial_semaphore=None, is_metadata_mode=False):
         self.queue = queue 
-        # manager can be PieceManager OR MetadataManager depending on mode
         self.manager = manager 
         self.info_hash = info_hash
         self.my_peer_id = peer_id
+        self.dial_semaphore = dial_semaphore # New: Flow control
         self.is_metadata_mode = is_metadata_mode
         self.remote_peer_id = None
         
@@ -51,17 +51,21 @@ class PeerConnection:
 
     async def _connect_and_loop(self):
         try:
-            self.reader, self.writer = await asyncio.wait_for(
-                asyncio.open_connection(self.ip, self.port), timeout=10
-            )
+            # CRITICAL: Router Protection
+            # Only allow N workers to be in the "Dialing" phase at once.
+            if self.dial_semaphore:
+                async with self.dial_semaphore:
+                    await self._establish_socket()
+            else:
+                await self._establish_socket()
+
+            # Connection Established -> Now we are "Connected" (not half-open)
+            # We can proceed with the protocol.
             
             await asyncio.wait_for(self._perform_handshake(), timeout=10)
             
             if self.supports_extensions:
                 await self._send_extended_handshake()
-            
-            # If in normal mode, we can send Bitfield/Interested now.
-            # If in Metadata mode, we wait for ExtHandshake to see size.
             
             if not self.is_metadata_mode:
                 await self._send_interested()
@@ -75,6 +79,15 @@ class PeerConnection:
             raise
         except Exception as e:
             logging.error(f"Error {self.ip}: {e}")
+
+    async def _establish_socket(self):
+        """
+        Opens the TCP connection. 
+        Wrapped by semaphore in _connect_and_loop to limit half-open states.
+        """
+        self.reader, self.writer = await asyncio.wait_for(
+            asyncio.open_connection(self.ip, self.port), timeout=10
+        )
 
     async def _perform_handshake(self):
         hs = message.Handshake(self.info_hash, self.my_peer_id)
@@ -96,10 +109,7 @@ class PeerConnection:
         self.remote_peer_id = data[48:]
 
     async def _send_extended_handshake(self):
-        # We assume we map ut_pex:1, ut_metadata:2
-        # metadata_size is optional (0 if we don't have it yet)
-        msg = message.ExtendedHandshake() # This class needs update in message.py? 
-        # Actually message.py hardcoded ut_pex:1, ut_metadata:2. We are good.
+        msg = message.ExtendedHandshake()
         self.writer.write(msg.encode())
         await self.writer.drain()
 
@@ -141,10 +151,8 @@ class PeerConnection:
             return
 
         if self.is_metadata_mode:
-            # Ignore standard pieces while fetching metadata
             return
 
-        # Normal Mode handlers
         if msg.msg_id == message.CHOKE:
             self.peer_choking = True
         elif msg.msg_id == message.UNCHOKE:
@@ -178,7 +186,6 @@ class PeerConnection:
         if ext_id == 0:
             self._handle_ext_handshake(data)
         else:
-            # Map ID to name
             ext_name = None
             for name, remote_id in self.remote_extensions.items():
                 if remote_id == ext_id:
@@ -211,47 +218,18 @@ class PeerConnection:
         except Exception: pass
 
     async def _handle_ut_metadata(self, data):
-        # Format: Bencoded Dict + Raw Data
-        # We need to find where the dict ends.
-        # This is tricky with our current decoder which expects full consumption.
-        # We will scan for 'e' end of dict? No, 'ee' sometimes.
-        # Better: Decode strictly, get length of encoded dict, slice rest.
-        
         try:
-            # Our Decoder consumes. We need to modify Decoder or guess.
-            # Simplified approach: Look for "msg_type" and "piece".
-            
-            # For robustness, we construct a Decoder that tells us how much it read.
-            # We don't have that yet.
-            # Hack: Assume the dict header is small (<200 bytes) and valid bencode.
-            # We'll try to find the bencoded end "e" that balances the start "d".
-            
             decoder = Decoder(data)
             msg_dict = decoder.decode()
-            # Decoder doesn't expose consumed count.
-            # Let's rely on the fact that if it's DATA (1), the REST is the piece.
-            
             msg_type = msg_dict[b'msg_type']
             piece_index = msg_dict[b'piece']
             
-            if msg_type == 1: # DATA
-                # Where did the dict end?
-                # This is hard without updating Bencoder.
-                # Let's update bencoding.py to expose index.
-                pass 
-                
-                # Assume we solved finding payload:
-                # payload = data[decoder._index:] # Accessing private member for now
+            if msg_type == 1: 
                 payload = decoder._data[decoder._index:]
-                
                 if self.is_metadata_mode:
                     self.manager.receive_data(piece_index, payload)
                     if not self.manager.complete:
                         await self._request_metadata_piece()
-            
-            elif msg_type == 2: # REJECT
-                pass # Try another peer
-                
         except Exception:
             pass
 
@@ -261,12 +239,9 @@ class PeerConnection:
         
         index = self.manager.get_next_request()
         if index is not None:
-            # Send Request (msg_type 0)
             req = {b'msg_type': 0, b'piece': index}
             encoded_req = Encoder(req).encode()
-            
             ext_id = self.remote_extensions[b'ut_metadata']
-            # ExtMsgID(1) + Payload
             msg = message.ExtendedMessage(ext_id, encoded_req)
             self.writer.write(msg.encode())
             await self.writer.drain()

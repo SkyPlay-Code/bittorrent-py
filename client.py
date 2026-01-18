@@ -9,16 +9,21 @@ from metadata import MetadataManager
 from peer import PeerConnection
 from nat import NatTraverser
 
+MAX_PEER_CONNECTIONS = 50  # Global Limit
+MAX_HALF_OPEN = 10         # Router Safety Limit
+
 class TorrentClient:
     def __init__(self, torrent_file):
         self.torrent = Torrent(torrent_file)
         self.tracker = Tracker(self.torrent)
-        # We DO NOT init PieceManager yet if it's a magnet link
         self.piece_manager = None 
         self.peers_queue = asyncio.Queue()
         self.workers = []
         self.abort = False
         self.nat = NatTraverser()
+        
+        # Router Protection: Semaphore to limit concurrent SYN packets
+        self.dial_semaphore = asyncio.Semaphore(MAX_HALF_OPEN)
 
     async def start(self):
         logging.info(f"Starting client...")
@@ -26,7 +31,7 @@ class TorrentClient:
         print("Attempting UPnP Port Mapping...")
         await self.nat.map_port(6881)
 
-        # --- Phase 1: Metadata Download (Magnet Links) ---
+        # --- Phase 1: Metadata Download ---
         if not self.torrent.loaded:
             print("Magnet Link detected. Fetching Metadata...")
             success = await self._fetch_metadata()
@@ -39,63 +44,51 @@ class TorrentClient:
         print(f"Initializing Download: {self.torrent.output_file}")
         self.piece_manager = PieceManager(self.torrent)
         
-        # Start Normal Workers
-        self.workers = [] # Clear any metadata workers
-        for _ in range(10): 
+        # Start Normal Workers (Scaled up to MAX_PEER_CONNECTIONS)
+        self.workers = [] 
+        for _ in range(MAX_PEER_CONNECTIONS): 
             worker = PeerConnection(self.peers_queue, self.piece_manager, 
-                                    self.torrent.info_hash, self.tracker.peer_id)
+                                    self.torrent.info_hash, self.tracker.peer_id,
+                                    dial_semaphore=self.dial_semaphore)
             task = asyncio.create_task(worker.run())
             self.workers.append(task)
 
-        # Main UI Loop
         await self._download_loop()
 
     async def _fetch_metadata(self):
-        """
-        Runs a specialized loop to fetch the .torrent info dictionary.
-        """
         meta_manager = MetadataManager(self.torrent.info_hash)
         
-        # Start Metadata Workers
-        # We reuse PeerConnection but in 'metadata mode'
-        for _ in range(10):
+        # Metadata Phase also respects connection limits
+        for _ in range(MAX_PEER_CONNECTIONS):
             worker = PeerConnection(self.peers_queue, meta_manager, 
                                     self.torrent.info_hash, self.tracker.peer_id,
+                                    dial_semaphore=self.dial_semaphore,
                                     is_metadata_mode=True)
             task = asyncio.create_task(worker.run())
             self.workers.append(task)
             
-        # Loop until complete
         print("Connecting to swarm for metadata...")
-        
-        # Initial Announce
         asyncio.create_task(self._announce_wrapper())
         
         start_time = time.time()
         while not meta_manager.complete and not self.abort:
-            # Announce periodically
             if time.time() - start_time > 60:
                  asyncio.create_task(self._announce_wrapper())
                  start_time = time.time()
             
-            # Simple progress spinner
             sys.stdout.write(f"\rPeers: {self.peers_queue.qsize()} | Metadata: {'Searching...' if not meta_manager.active else f'{sum(1 for p in meta_manager.pieces if p)}/{meta_manager.num_pieces}'}   ")
             sys.stdout.flush()
             await asyncio.sleep(1)
             
-        print() # Newline
+        print() 
         
         if self.abort: return False
         
-        # Load the data into Torrent object
         self.torrent.load_metadata(meta_manager.raw_data)
         
-        # Stop all metadata workers
-        for task in self.workers:
-            task.cancel()
+        for task in self.workers: task.cancel()
         self.workers = []
         
-        # Empty the queue (optional, but good practice to clear old connection attempts)
         while not self.peers_queue.empty():
             try: self.peers_queue.get_nowait()
             except: break
